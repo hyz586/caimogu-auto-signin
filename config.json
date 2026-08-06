@@ -1,0 +1,11 @@
+{
+  "circle_url": "https://www.caimogu.cc/circle/308.html",
+  "reply_count": 3,
+  "min_delay": 8,
+  "max_delay": 20,
+  "headless": true,
+  "page_timeout_ms": 90000,
+  "deepseek_api_key": "",
+  "deepseek_base_url": "https://api.deepseek.com/v1",
+  "deepseek_model": "deepseek-chat"
+}
