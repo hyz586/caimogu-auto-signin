@@ -2,7 +2,13 @@
 # -*- coding: utf-8 -*-
 """
 采蘑菇论坛（caimogu.cc）自动签到脚本
-功能：每天自动在"多人运动圈"板块回复3个帖子，获取活跃度
+功能：每天自动在指定圈子板块回复若干帖子，获取活跃度
+
+用法：
+  python caimogu_signin.py            执行自动签到
+  python caimogu_signin.py --login    配置登录（首次使用）
+  python caimogu_signin.py --test     测试评论生成效果
+  python caimogu_signin.py --help     显示帮助
 """
 
 import json
@@ -15,22 +21,33 @@ import logging
 from datetime import datetime, date
 from pathlib import Path
 
-# ===== 路径配置 =====
+# ============================================================
+#  1. 路径与常量
+# ============================================================
+
 if getattr(sys, "frozen", False):
     SCRIPT_DIR = Path(sys.executable).parent.absolute()
 else:
     SCRIPT_DIR = Path(__file__).parent.absolute()
-CONFIG_FILE = SCRIPT_DIR / "config.json"
-AUTH_FILE = SCRIPT_DIR / "auth_state.json"
-REPLIED_FILE = SCRIPT_DIR / "replied_posts.json"
-LOG_FILE = SCRIPT_DIR / "signin_log.txt"
 
-# 免安装版优先使用程序目录旁边的 Playwright 浏览器，避免要求用户额外安装浏览器依赖
-PLAYWRIGHT_BROWSERS_DIR = SCRIPT_DIR / "playwright-browsers"
-if PLAYWRIGHT_BROWSERS_DIR.exists():
-    os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(PLAYWRIGHT_BROWSERS_DIR))
+PATHS = {
+    "config":  SCRIPT_DIR / "config.json",
+    "auth":    SCRIPT_DIR / "auth_state.json",
+    "replied": SCRIPT_DIR / "replied_posts.json",
+    "log":     SCRIPT_DIR / "signin_log.txt",
+}
 
-# ===== 默认配置 =====
+# 免安装版优先使用程序目录旁边的 Playwright 浏览器
+_browsers_dir = SCRIPT_DIR / "playwright-browsers"
+if _browsers_dir.exists():
+    os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(_browsers_dir))
+
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
+
 DEFAULT_CONFIG = {
     "circle_url": "https://www.caimogu.cc/circle/492.html",
     "reply_count": 3,
@@ -43,7 +60,45 @@ DEFAULT_CONFIG = {
     "deepseek_model": "deepseek-chat",
 }
 
-# ===== 评论模板库（包含 {keyword} 占位符，会替换为帖子关键词）=====
+# 页面选择器集中定义（顺序敏感，勿随意调整）
+SELECTORS = {
+    "post_item":  ".list-container .list .item",
+    "post_title": ".title",
+    "content": (
+        ".post-content", ".content", ".detail-content",
+        ".post-body", ".text", ".post-detail-content",
+    ),
+    "editor": (
+        ".ql-editor",
+        "#editor .ql-editor",
+        ".editor .ql-editor",
+        ".comment-editor .ql-editor",
+        "[contenteditable='true']",
+    ),
+    "reply_btn": (
+        ".btn-reply-root", ".btn-reply", ".reply-btn",
+        'a:has-text("回复")', 'button:has-text("回复")',
+    ),
+    "submit": (
+        ".btn-reply-root",
+        'button:has-text("回复")',
+        'button:has-text("发表")',
+        'button:has-text("提交")',
+        ".submit-btn",
+        ".btn-publish",
+        ".btn-send",
+        'input[type="submit"]',
+    ),
+    "error": ".error, .alert, .toast-error, .msg-error",
+    "login_link": 'a[href*="login"]',
+}
+
+SKIP_PIN_KEYWORDS = ["圈规", "答题系统反馈", "新圈规", "不允许乱转"]
+
+# ============================================================
+#  2. 评论模板与关键词常量
+# ============================================================
+
 COMMENT_TEMPLATES = [
     "{keyword}这个确实挺有意思的",
     "看到{keyword}了感觉还不错哦",
@@ -67,7 +122,6 @@ COMMENT_TEMPLATES = [
     "{keyword}这内容质量挺高支持",
 ]
 
-# 万能评论（不依赖关键词，适用于各种帖子）
 UNIVERSAL_COMMENTS = [
     "这帖子内容不错挺有参考价值",
     "感谢楼主分享学到了不少东西",
@@ -86,229 +140,18 @@ UNIVERSAL_COMMENTS = [
     "帖子写得挺详细的支持一个哈",
 ]
 
-
-# ============================================================
-#  配置与日志
-# ============================================================
-
-def load_config():
-    """加载配置文件，不存在则自动创建默认配置"""
-    if not CONFIG_FILE.exists():
-        save_config(DEFAULT_CONFIG)
-        return DEFAULT_CONFIG.copy()
-    try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            config = json.load(f)
-    except (json.JSONDecodeError, IOError):
-        return DEFAULT_CONFIG.copy()
-    merged = DEFAULT_CONFIG.copy()
-    merged.update(config)
-    return merged
-
-
-def save_config(config):
-    """保存配置文件"""
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(config, f, ensure_ascii=False, indent=2)
-
-
-def setup_logging():
-    """配置日志（同时输出到文件和控制台）"""
-    logger = logging.getLogger("caimogu")
-    logger.setLevel(logging.INFO)
-    # 防止重复添加 handler
-    if logger.handlers:
-        return logger
-    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-    fh = logging.FileHandler(str(LOG_FILE), encoding="utf-8")
-    fh.setLevel(logging.INFO)
-    fh.setFormatter(fmt)
-    logger.addHandler(fh)
-    ch = logging.StreamHandler()
-    ch.setLevel(logging.INFO)
-    ch.setFormatter(fmt)
-    logger.addHandler(ch)
-    return logger
-
-
-# ============================================================
-#  执行记录管理（防止重复执行）
-# ============================================================
-
-def load_replied_posts():
-    """加载执行记录"""
-    if not REPLIED_FILE.exists():
-        return {}
-    try:
-        with open(REPLIED_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, IOError):
-        return {}
-
-
-def save_replied_posts(data):
-    """保存执行记录"""
-    with open(REPLIED_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
-def is_already_done_today():
-    """检查今天是否已经执行过签到"""
-    data = load_replied_posts()
-    today = date.today().isoformat()
-    return data.get("last_run_date") == today
-
-
-def get_today_reply_count():
-    """获取今天已成功回复的数量"""
-    data = load_replied_posts()
-    today = date.today().isoformat()
-    if data.get("last_run_date") == today:
-        return int(data.get("last_run_posts", 0) or 0)
-    return 0
-
-
-def mark_today_progress(post_count):
-    """每成功回复一次就记录进度，避免中断后重复回复过多"""
-    data = load_replied_posts()
-    data["last_run_date"] = date.today().isoformat()
-    data["last_run_posts"] = post_count
-    data["last_run_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    data["status"] = "running" if post_count < DEFAULT_CONFIG.get("reply_count", 3) else "done"
-    save_replied_posts(data)
-
-
-def mark_done_today(post_count):
-    """标记今天已执行签到"""
-    data = load_replied_posts()
-    data["last_run_date"] = date.today().isoformat()
-    data["last_run_posts"] = post_count
-    data["last_run_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    data["status"] = "done"
-    save_replied_posts(data)
-
-
-# ============================================================
-#  评论生成
-# ============================================================
-
-# 常见无意义前缀（按长度从长到短排序，优先匹配长的）
 _MEANINGLESS_PREFIXES = [
     '大家来展示一下', '有没有人遇到', '求推荐几款', '请问一下大家',
     '大家来', '有没有人', '求推荐', '请问', '求教', '求助',
     '各位大佬', '大佬们', '各位', '有没有', '谁知道', '今天',
 ]
 
-# 常见无意义后缀
 _MEANINGLESS_SUFFIXES = [
     '分享一下好运', '分享一下', '的效果吧', '效果吧', '的问题求助',
     '求助', '分享', '效果', '吧', '呢', '啊', '吗', '哦', '哈', '了',
 ]
 
-# 关键词中不应包含的片段（包含则判定为低质量关键词）
 _BAD_PARTS = ['一下', '目前', '有没有', '谁知道', '大家来', '展示', '这个游戏', '好玩的单']
-
-
-def extract_keyword(title):
-    """
-    从帖子标题中提取关键词
-    策略：优先提取书名号/引号内容，否则去掉无意义前缀后缀取核心词
-    返回空字符串表示未提取到高质量关键词
-    """
-    # 去除常见前缀（板块标签等）
-    title = re.sub(r'^【.*?】\s*', '', title)
-    title = re.sub(r'^\[.*?\]\s*', '', title)
-
-    # 尝试提取书名号《》中的内容
-    match = re.search(r'《(.+?)》', title)
-    if match and len(match.group(1)) >= 2:
-        return match.group(1)[:6]
-
-    # 尝试提取引号中的内容
-    match = re.search(r'[\u201c\u201d"\u300c\u300d\u300e\u300f](.+?)[\u201c\u201d"\u300c\u300d\u300e\u300f]', title)
-    if match and len(match.group(1)) >= 2:
-        return match.group(1)[:6]
-
-    # 优先识别常见自然短语，比硬截前4个字更像真人
-    keyword_patterns = [
-        r'单机游戏', r'登录闪退', r'闪退问题', r'游戏画面', r'刷图效果',
-        r'版本更新', r'更新内容', r'抽卡出货', r'真人电影', r'档期原因',
-        r'主创澄清', r'合约已签', r'突然砍剧', r'推荐.*游戏',
-    ]
-    for pattern in keyword_patterns:
-        match = re.search(pattern, title)
-        if match:
-            found = match.group(0)
-            found = found.replace('推荐几款', '').replace('推荐', '')
-            if 2 <= len(found) <= 6:
-                return found
-
-    # 去除标点，得到纯文本
-    clean = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9]', '', title)
-
-    # 去除无意义前缀
-    for prefix in _MEANINGLESS_PREFIXES:
-        if clean.startswith(prefix) and len(clean) > len(prefix) + 2:
-            clean = clean[len(prefix):]
-            break
-
-    # 去除无意义后缀
-    for suffix in _MEANINGLESS_SUFFIXES:
-        if clean.endswith(suffix) and len(clean) > len(suffix) + 2:
-            clean = clean[:-len(suffix)]
-            break
-
-    # 检查关键词质量
-    if len(clean) >= 4:
-        keyword = clean[:4]
-        for bad in _BAD_PARTS:
-            if bad in keyword:
-                return ""  # 关键词质量不高
-        return keyword
-    elif len(clean) >= 2:
-        return clean
-    else:
-        return ""
-
-
-def _comment_len(text):
-    """计算评论有效字数"""
-    return len(re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9]', '', text))
-
-
-def _normalize_comment(text):
-    """清理评论，避免过度模板化和超长"""
-    text = re.sub(r'\s+', '', text)
-    text = text.strip('，。！？!?、；; ')
-    return text
-
-
-def _valid_comments(candidates):
-    """过滤出 10 到 20 字之间的评论"""
-    result = []
-    for item in candidates:
-        item = _normalize_comment(item)
-        if 10 <= _comment_len(item) <= 20:
-            result.append(item)
-    return result
-
-
-def detect_title_type(title):
-    """粗略判断帖子类型，用于生成更贴合标题的回复"""
-    if re.search(r'取消|砍|延期|跳票|停服|下架|暴死|失败|崩|凉', title):
-        return "regret"
-    if re.search(r'求助|请问|有没有|怎么|如何|为啥|为什么|闪退|报错|问题|卡住', title):
-        return "help"
-    if re.search(r'更新|版本|补丁|改动|上线|发布|公布|官宣|新增', title):
-        return "update"
-    if re.search(r'推荐|安利|好玩|入坑|值得买吗|买不买', title):
-        return "recommend"
-    if re.search(r'抽卡|出货|晒|欧|非|运气|掉落', title):
-        return "luck"
-    if re.search(r'电影|剧|漫威|动画|漫画|主创|演员', title):
-        return "media"
-    return "normal"
-
 
 _BANNED_COMMENT_PARTS = [
     "感谢分享", "支持一下", "学到了", "坐等后续", "确实如此",
@@ -317,12 +160,10 @@ _BANNED_COMMENT_PARTS = [
     "值得讨论", "内容质量", "参考价值", "信息量", "蹲一个靠谱"
 ]
 
-
 _SKIP_TITLE_PATTERNS = [
     r'^\s*签到\s*$', r'每日签到', r'打卡', r'水帖', r'路过',
     r'顶一下', r'冒个泡', r'有人吗', r'随便聊聊', r'无内容',
 ]
-
 
 _DETAIL_STOP_WORDS = [
     "这个", "那个", "什么", "一下", "一个", "不是", "就是", "可以", "感觉",
@@ -330,7 +171,6 @@ _DETAIL_STOP_WORDS = [
     "回复", "签到", "每日", "今天", "有人", "有没有", "为什么", "怎么",
     "分享", "看看", "求助", "推荐", "问题"
 ]
-
 
 _DETAIL_PATTERNS = [
     r'多次.{0,3}换导演', r'换导演', r'剧本调整',
@@ -343,7 +183,6 @@ _DETAIL_PATTERNS = [
     r'真人.{0,3}电影', r'单机.{0,3}游戏', r'取消', r'延期',
     r'报错', r'卡住', r'掉帧', r'联机', r'存档', r'补丁'
 ]
-
 
 _REPLY_TEMPLATES = {
     "help": [
@@ -390,6 +229,178 @@ _REPLY_TEMPLATES = {
     ],
 }
 
+# ============================================================
+#  3. JSON 工具函数
+# ============================================================
+
+def load_json(path, default):
+    """读取 JSON 文件，出错时返回 default"""
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, IOError):
+        return default
+
+
+def save_json(path, data):
+    """写入 JSON 文件"""
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+# ============================================================
+#  4. 日志
+# ============================================================
+
+def setup_logging():
+    """配置日志（同时输出到文件和控制台）"""
+    logger = logging.getLogger("caimogu")
+    logger.setLevel(logging.INFO)
+    if logger.handlers:
+        return logger
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    fh = logging.FileHandler(str(PATHS["log"]), encoding="utf-8")
+    fh.setLevel(logging.INFO)
+    fh.setFormatter(fmt)
+    logger.addHandler(fh)
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+    ch.setFormatter(fmt)
+    logger.addHandler(ch)
+    return logger
+
+# ============================================================
+#  5. 配置与执行记录
+# ============================================================
+
+def load_config():
+    """加载配置，不存在则自动创建默认配置"""
+    config = DEFAULT_CONFIG.copy()
+    if not PATHS["config"].exists():
+        save_json(PATHS["config"], config)
+        return config
+    config.update(load_json(PATHS["config"], {}))
+    return config
+
+
+def get_today_reply_count():
+    """获取今天已成功回复的数量"""
+    data = load_json(PATHS["replied"], {})
+    today = date.today().isoformat()
+    if data.get("last_run_date") == today:
+        return int(data.get("last_run_posts", 0) or 0)
+    return 0
+
+
+def mark_today_progress(post_count):
+    """记录进度，避免中断后重复回复"""
+    data = load_json(PATHS["replied"], {})
+    data["last_run_date"] = date.today().isoformat()
+    data["last_run_posts"] = post_count
+    data["last_run_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    data["status"] = "running" if post_count < DEFAULT_CONFIG["reply_count"] else "done"
+    save_json(PATHS["replied"], data)
+
+
+def mark_done_today(post_count):
+    """标记今天签到完成"""
+    data = load_json(PATHS["replied"], {})
+    data["last_run_date"] = date.today().isoformat()
+    data["last_run_posts"] = post_count
+    data["last_run_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    data["status"] = "done"
+    save_json(PATHS["replied"], data)
+
+# ============================================================
+#  6. 评论生成（纯逻辑，不涉及页面操作）
+# ============================================================
+
+def _comment_len(text):
+    """计算评论有效字数"""
+    return len(re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9]', '', text))
+
+
+def _normalize_comment(text):
+    """清理评论，避免过度模板化和超长"""
+    text = re.sub(r'\s+', '', text)
+    text = text.strip('，。！？!?、；; ')
+    return text
+
+
+def _valid_comments(candidates):
+    """过滤出 10 到 20 字之间的评论"""
+    result = []
+    for item in candidates:
+        item = _normalize_comment(item)
+        if 10 <= _comment_len(item) <= 20:
+            result.append(item)
+    return result
+
+
+def detect_title_type(title):
+    """粗略判断帖子类型，用于生成更贴合标题的回复"""
+    if re.search(r'取消|砍|延期|跳票|停服|下架|暴死|失败|崩|凉', title):
+        return "regret"
+    if re.search(r'求助|请问|有没有|怎么|如何|为啥|为什么|闪退|报错|问题|卡住', title):
+        return "help"
+    if re.search(r'更新|版本|补丁|改动|上线|发布|公布|官宣|新增', title):
+        return "update"
+    if re.search(r'推荐|安利|好玩|入坑|值得买吗|买不买', title):
+        return "recommend"
+    if re.search(r'抽卡|出货|晒|欧|非|运气|掉落', title):
+        return "luck"
+    if re.search(r'电影|剧|漫威|动画|漫画|主创|演员', title):
+        return "media"
+    return "normal"
+
+
+def extract_keyword(title):
+    """从帖子标题中提取关键词"""
+    title = re.sub(r'^【.*?】\s*', '', title)
+    title = re.sub(r'^\[.*?\]\s*', '', title)
+
+    match = re.search(r'《(.+?)》', title)
+    if match and len(match.group(1)) >= 2:
+        return match.group(1)[:6]
+
+    match = re.search(r'[\u201c\u201d"\u300c\u300d\u300e\u300f](.+?)[\u201c\u201d"\u300c\u300d\u300e\u300f]', title)
+    if match and len(match.group(1)) >= 2:
+        return match.group(1)[:6]
+
+    keyword_patterns = [
+        r'单机游戏', r'登录闪退', r'闪退问题', r'游戏画面', r'刷图效果',
+        r'版本更新', r'更新内容', r'抽卡出货', r'真人电影', r'档期原因',
+        r'主创澄清', r'合约已签', r'突然砍剧', r'推荐.*游戏',
+    ]
+    for pattern in keyword_patterns:
+        match = re.search(pattern, title)
+        if match:
+            found = match.group(0).replace('推荐几款', '').replace('推荐', '')
+            if 2 <= len(found) <= 6:
+                return found
+
+    clean = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9]', '', title)
+
+    for prefix in _MEANINGLESS_PREFIXES:
+        if clean.startswith(prefix) and len(clean) > len(prefix) + 2:
+            clean = clean[len(prefix):]
+            break
+
+    for suffix in _MEANINGLESS_SUFFIXES:
+        if clean.endswith(suffix) and len(clean) > len(suffix) + 2:
+            clean = clean[:-len(suffix)]
+            break
+
+    if len(clean) >= 4:
+        keyword = clean[:4]
+        for bad in _BAD_PARTS:
+            if bad in keyword:
+                return ""
+        return keyword
+    elif len(clean) >= 2:
+        return clean
+    else:
+        return ""
+
 
 def _strip_html_and_noise(text):
     """清理正文噪音，保留适合判断和回复的文本"""
@@ -408,7 +419,7 @@ def _meaningful_text_len(text):
 
 
 def _is_generic_or_empty(title, content):
-    """判断帖子是否太空泛，硬回会像水贴"""
+    """判断帖子是否太空泛"""
     title = title or ""
     content = _strip_html_and_noise(content)
     compact_title = re.sub(r'\s+', '', title)
@@ -434,7 +445,7 @@ def _is_generic_or_empty(title, content):
 
 
 def judge_replyability(title, content):
-    """第一步：判断是否有明确可回应点"""
+    """判断是否有明确可回应点，返回 REPLY 或 SKIP"""
     title = title or ""
     content = _strip_html_and_noise(content)
     combined = title + " " + content
@@ -445,7 +456,6 @@ def judge_replyability(title, content):
     if any(bad in combined for bad in ["灌水", "纯水", "无意义", "占楼"]):
         return "SKIP"
 
-    # 标题或正文里有明确事件、问题、改动、结果、偏好时，才允许回复
     signal_patterns = [
         r'取消|延期|下架|停服|砍了|跳票',
         r'求助|请问|闪退|报错|卡住|失败|问题|怎么|为什么',
@@ -458,7 +468,6 @@ def judge_replyability(title, content):
     if any(re.search(pattern, combined) for pattern in signal_patterns):
         return "REPLY"
 
-    # 正文足够具体，也可以回复
     if _meaningful_text_len(content) >= 30:
         return "REPLY"
 
@@ -480,7 +489,6 @@ def _extract_detail(title, content):
             return "多次换导演"
         return detail[:10]
 
-    # 优先从正文抓细节，避免只重复标题
     compact_content = re.sub(r'\s+', '', content)
     for pattern in _DETAIL_PATTERNS:
         m = re.search(pattern, compact_content)
@@ -537,7 +545,7 @@ def _normalize_generated_comment(text):
 
 
 def _is_reply_valid(comment, title="", content=""):
-    """检查回复是否符合新规则"""
+    """检查回复是否符合规则"""
     comment = _normalize_generated_comment(comment)
     if not comment or comment.upper() == "SKIP":
         return False
@@ -574,13 +582,13 @@ def generate_comment_template(title, content=""):
 
 
 def _call_deepseek_api(url, headers, data, logger):
-    """发起一次 API 请求，返回 (raw_content, returned_model) 或 None"""
+    """发起一次 API 请求，返回 (raw_content, returned_model)"""
     import requests
     resp = requests.post(url, headers=headers, json=data, timeout=20)
     resp.raise_for_status()
     result = resp.json()
     returned_model = result.get("model", "未知")
-    logger.info("AI 返回模型: %s" % returned_model)
+    logger.info("AI 返回模型: %s", returned_model)
     raw_content = result["choices"][0]["message"]["content"]
     return raw_content, returned_model
 
@@ -598,11 +606,10 @@ def generate_comment_ai(title, content, api_key, base_url, model):
             "Content-Type": "application/json"
         }
 
-        # 截断超长标题，避免输入过长导致 AI 返回空
         title_clean = (title or "").strip()
         if len(title_clean) > 200:
             title_clean = title_clean[:200]
-            logger.info("标题过长(>%d字)，已截断" % len(title or ""))
+            logger.info("标题过长(>%d字)，已截断", len(title or ""))
 
         content_summary = _strip_html_and_noise(content)[:700] if content else ""
         prompt = (
@@ -628,8 +635,7 @@ def generate_comment_ai(title, content, api_key, base_url, model):
             "temperature": 0.9
         }
 
-        # 第一次请求
-        logger.info("AI 请求: base_url=%s, model=%s" % (base_url, model))
+        logger.info("AI 请求: base_url=%s, model=%s", base_url, model)
         try:
             raw_content, _ = _call_deepseek_api(url, headers, data, logger)
         except _requests.exceptions.HTTPError as e:
@@ -640,14 +646,13 @@ def generate_comment_ai(title, content, api_key, base_url, model):
             else:
                 raise
 
-        logger.info("AI 原始返回: %s" % raw_content)
+        logger.info("AI 原始返回: %s", raw_content)
         comment = _normalize_generated_comment(raw_content)
-        logger.info("AI 清洗后: %s (字数=%d)" % (comment, _comment_len(comment)))
+        logger.info("AI 清洗后: %s (字数=%d)", comment, _comment_len(comment))
 
         if comment.upper() == "SKIP":
             return "SKIP"
 
-        # AI 返回空或太短：缩短输入后重试一次
         if _comment_len(comment) < 5:
             logger.warning("AI 返回空或太短，缩短输入后重试一次")
             retry_data = {
@@ -667,9 +672,9 @@ def generate_comment_ai(title, content, api_key, base_url, model):
                     logger.warning("重试也触发429，回退模板")
                     return generate_comment_template(title, content)
                 raise
-            logger.info("AI 重试返回: %s" % raw_content2)
+            logger.info("AI 重试返回: %s", raw_content2)
             comment = _normalize_generated_comment(raw_content2)
-            logger.info("AI 重试清洗后: %s (字数=%d)" % (comment, _comment_len(comment)))
+            logger.info("AI 重试清洗后: %s (字数=%d)", comment, _comment_len(comment))
 
             if comment.upper() == "SKIP":
                 return "SKIP"
@@ -679,17 +684,17 @@ def generate_comment_ai(title, content, api_key, base_url, model):
 
         _HARD_BANNED = ["感谢分享", "支持一下", "学到了", "坐等后续", "期待更新", "前排围观"]
         if any(part in comment for part in _HARD_BANNED):
-            logger.warning("AI 回复含套话，回退模板: %s" % comment)
+            logger.warning("AI 回复含套话，回退模板: %s", comment)
             return generate_comment_template(title, content)
 
         return comment
     except Exception as e:
-        logging.getLogger("caimogu").warning("AI生成评论失败，回退到模板模式: " + str(e))
+        logging.getLogger("caimogu").warning("AI生成评论失败，回退到模板模式: %s", e)
         return generate_comment_template(title, content)
 
 
 def generate_comment(title, content, config):
-    """根据配置选择AI模式或模板模式生成评论；可能返回 SKIP"""
+    """根据配置选择 AI 模式或模板模式生成评论；可能返回 SKIP"""
     api_key = config.get("deepseek_api_key", "")
     if api_key:
         base_url = config.get("deepseek_base_url", "https://api.deepseek.com/v1")
@@ -697,9 +702,266 @@ def generate_comment(title, content, config):
         return generate_comment_ai(title, content, api_key, base_url, model)
     return generate_comment_template(title, content)
 
+# ============================================================
+#  7. Playwright 工具函数
+# ============================================================
+
+def first_element(page, selectors, *, wait=False, timeout=5000):
+    """按顺序查找第一个存在的元素，返回 (element, selector) 或 (None, None)"""
+    for selector in selectors:
+        try:
+            if wait:
+                element = page.wait_for_selector(selector, timeout=timeout)
+            else:
+                element = page.query_selector(selector)
+            if element:
+                return element, selector
+        except Exception:
+            continue
+    return None, None
+
+
+def get_text(page, selectors, limit=500):
+    """从多个选择器中提取第一个匹配元素的文本"""
+    element, _ = first_element(page, selectors)
+    if not element:
+        return ""
+    try:
+        return element.inner_text()[:limit].strip()
+    except Exception:
+        return ""
+
+
+def create_context(playwright, *, headless=True, storage_state=None):
+    """创建浏览器上下文，返回 (browser, context)"""
+    browser = playwright.chromium.launch(headless=headless)
+    context = browser.new_context(
+        viewport={"width": 1280, "height": 800},
+        user_agent=USER_AGENT,
+        storage_state=storage_state,
+    )
+    return browser, context
 
 # ============================================================
-#  登录管理
+#  8. 页面操作
+# ============================================================
+
+def get_post_list(page, config, count, logger):
+    """从板块页面获取帖子列表，自动跳过置顶帖"""
+    circle_url = config["circle_url"]
+    logger.info("正在获取帖子列表: %s", circle_url)
+    try:
+        page.goto(circle_url, timeout=config.get("page_timeout_ms", 90000),
+                  wait_until="domcontentloaded")
+    except Exception as e:
+        logger.warning("板块页面加载超时，尝试继续解析已加载内容: %s", e)
+    page.wait_for_timeout(3000)
+
+    try:
+        page.wait_for_selector(SELECTORS["post_item"], timeout=10000)
+    except Exception:
+        logger.error("帖子列表未加载，可能页面结构有变化")
+        return []
+
+    items = page.query_selector_all(SELECTORS["post_item"])
+    posts = []
+    skipped_pinned = 0
+    max_candidates = max(count * 8, count + 10)
+
+    for item in items[:max_candidates]:
+        try:
+            title_el = item.query_selector(SELECTORS["post_title"])
+            if not title_el:
+                continue
+            href = title_el.get_attribute("href")
+            title = title_el.inner_text().strip()
+            if not (href and title):
+                continue
+
+            item_class = item.get_attribute("class") or ""
+            item_html = item.inner_html()[:500] if hasattr(item, "inner_html") else ""
+            is_pinned = (
+                "sticky" in item_class.lower()
+                or "pin" in item_class.lower()
+                or "top" in item_class.lower()
+                or "置顶" in item_html
+                or "精华" in item_html
+            )
+            title_matches_skip = any(kw in title for kw in SKIP_PIN_KEYWORDS)
+
+            if is_pinned or title_matches_skip:
+                skipped_pinned += 1
+                logger.info("跳过置顶帖: %s", title)
+                continue
+
+            if not href.startswith("http"):
+                href = "https://www.caimogu.cc" + href
+            posts.append({"url": href, "title": title})
+            if len(posts) >= max_candidates:
+                break
+        except Exception:
+            continue
+
+    logger.info("跳过 %d 个置顶帖，获取到 %d 个普通帖子", skipped_pinned, len(posts))
+    return posts
+
+
+def extract_post_info(page):
+    """从当前帖子页面提取标题和内容"""
+    page_title = page.title()
+    title = re.sub(r'\s*-\s*.*$', '', page_title).strip()
+    content = get_text(page, SELECTORS["content"], limit=500)
+    return title, content
+
+
+def find_editor(page, logger):
+    """查找回复编辑器，必要时先点击回复按钮"""
+    editor, sel = first_element(page, SELECTORS["editor"], wait=True, timeout=5000)
+    if editor:
+        logger.info("找到回复编辑器: %s", sel)
+        return editor
+
+    # 尝试点击回复按钮后再查找
+    btn, _ = first_element(page, SELECTORS["reply_btn"])
+    if btn:
+        try:
+            btn.click()
+            page.wait_for_timeout(2000)
+        except Exception:
+            pass
+
+    editor, sel = first_element(page, SELECTORS["editor"], wait=True, timeout=5000)
+    if editor:
+        logger.info("找到回复编辑器(点击回复后): %s", sel)
+    return editor
+
+
+def input_comment(page, editor, comment, logger):
+    """输入评论到编辑器，依次尝试 fill → evaluate → keyboard.type"""
+    editor.click()
+    page.wait_for_timeout(300)
+
+    # 方式一：fill
+    try:
+        editor.fill(comment)
+        page.wait_for_timeout(500)
+        logger.info("评论已输入编辑器(fill)")
+        return True
+    except Exception:
+        pass
+
+    # 方式二：直接设置 Quill 编辑器内容
+    try:
+        page.evaluate(
+            '(text) => { var ed = document.querySelector(".ql-editor"); '
+            'if(ed) { ed.innerHTML = "<p>" + text + "</p>"; '
+            'ed.dispatchEvent(new Event("input", {bubbles: true})); } }',
+            comment
+        )
+        page.wait_for_timeout(500)
+        logger.info("评论已输入编辑器(evaluate)")
+        return True
+    except Exception:
+        pass
+
+    # 方式三：键盘逐字输入
+    try:
+        editor.click()
+        page.wait_for_timeout(200)
+        page.keyboard.type(comment, delay=50)
+        page.wait_for_timeout(500)
+        logger.info("评论已输入编辑器(keyboard)")
+        return True
+    except Exception as e:
+        logger.error("输入评论失败: %s", e)
+        return False
+
+
+def submit_reply(page, logger):
+    """查找并点击提交按钮，返回是否成功"""
+    btn, sel = first_element(page, SELECTORS["submit"])
+    if btn:
+        try:
+            btn.click()
+            logger.info("点击提交按钮: %s", sel)
+            return True
+        except Exception as e:
+            logger.error("点击提交按钮失败: %s", e)
+            return False
+
+    # 备选：Ctrl+Enter
+    try:
+        page.keyboard.press("Control+Enter")
+        logger.info("通过 Ctrl+Enter 提交")
+        return True
+    except Exception:
+        logger.error("未找到提交按钮")
+        return False
+
+
+def reply_to_post(page, post_url, config, logger):
+    """打开帖子并回复（页面交互层，评论生成委托给 generate_comment）"""
+    logger.info("正在打开帖子: %s", post_url)
+
+    try:
+        try:
+            page.goto(post_url, timeout=config.get("page_timeout_ms", 90000),
+                      wait_until="domcontentloaded")
+        except Exception as e:
+            logger.warning("帖子页面加载超时，尝试继续: %s", e)
+        page.wait_for_timeout(3000)
+
+        # 提取帖子信息
+        title, content = extract_post_info(page)
+
+        # 生成评论（纯逻辑，不涉及页面操作）
+        comment = generate_comment(title, content, config)
+        logger.info("帖子标题: %s", title)
+        if comment == "SKIP":
+            logger.info("判断结果: SKIP，跳过此帖")
+            return False
+        logger.info("生成评论: %s", comment)
+
+        # 滚动到底部
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        page.wait_for_timeout(1500)
+
+        # 查找编辑器
+        editor = find_editor(page, logger)
+        if not editor:
+            logger.error("未找到回复输入框，跳过此帖子")
+            return False
+
+        # 输入评论
+        if not input_comment(page, editor, comment, logger):
+            return False
+
+        # 提交回复
+        if not submit_reply(page, logger):
+            return False
+
+        # 等待提交完成
+        page.wait_for_timeout(3000)
+
+        # 检查错误提示
+        try:
+            error_el = page.query_selector(SELECTORS["error"])
+            if error_el:
+                error_text = error_el.inner_text()
+                if error_text and len(error_text) > 2:
+                    logger.warning("页面提示: %s", error_text)
+        except Exception:
+            pass
+
+        logger.info("回复提交完成")
+        return True
+
+    except Exception as e:
+        logger.error("回复帖子时出错: %s", e)
+        return False
+
+# ============================================================
+#  9. 登录流程
 # ============================================================
 
 def setup_login():
@@ -721,35 +983,29 @@ def setup_login():
     input("按回车键打开浏览器...")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
-        context = browser.new_context(
-            viewport={"width": 1280, "height": 800},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
-        page = context.new_page()
+        browser, context = create_context(p, headless=False)
+        try:
+            page = context.new_page()
+            page.goto("https://www.caimogu.cc/login.html")
+            print()
+            print("浏览器已打开采蘑菇论坛登录页面。")
+            print("请在浏览器中完成登录操作。")
+            print("(支持手机号登录、微信登录、Apple登录)")
+            print()
+            input(">>> 登录完成后按回车键保存 <<<")
 
-        page.goto("https://www.caimogu.cc/login.html")
-        print()
-        print("浏览器已打开采蘑菇论坛登录页面。")
-        print("请在浏览器中完成登录操作。")
-        print("(支持手机号登录、微信登录、Apple登录)")
-        print()
-        print("登录成功后，请回到此窗口按回车键。")
-        print()
-        input(">>> 登录完成后按回车键保存 <<<")
-
-        # 保存登录状态
-        context.storage_state(path=str(AUTH_FILE))
-        print()
-        print("[成功] 登录状态已保存到: " + str(AUTH_FILE))
-        print()
-        print("配置完成！接下来你可以：")
-        print("  1. 运行 run.bat 手动测试签到")
-        print("  2. 运行 setup_autostart.bat 设置开机自启动")
-        print()
-
-        browser.close()
-        input("按回车键退出...")
+            context.storage_state(path=str(PATHS["auth"]))
+            print()
+            print("[成功] 登录状态已保存到: %s" % PATHS["auth"])
+            print()
+            print("配置完成！接下来你可以：")
+            print("  1. 运行 启动签到.bat 手动测试签到")
+            print("  2. 运行 设置开机自启.bat 设置开机自启动")
+            print()
+        finally:
+            context.close()
+            browser.close()
+    input("按回车键退出...")
 
 
 def check_login_status(page, logger):
@@ -758,8 +1014,7 @@ def check_login_status(page, logger):
         page.goto("https://www.caimogu.cc/", timeout=60000, wait_until="domcontentloaded")
         page.wait_for_timeout(2000)
 
-        # 检查页面中是否有登录链接（未登录时通常显示"登录"按钮）
-        login_links = page.query_selector_all('a[href*="login"]')
+        login_links = page.query_selector_all(SELECTORS["login_link"])
         for link in login_links:
             try:
                 text = link.inner_text()
@@ -769,264 +1024,12 @@ def check_login_status(page, logger):
                 continue
         return True
     except Exception as e:
-        logger.warning("检查登录状态时出错: " + str(e))
-        return True  # 无法确定时假设已登录，让后续流程尝试
-
-
-# ============================================================
-#  签到核心逻辑
-# ============================================================
-
-def get_post_list(page, circle_url, count, logger):
-    """从板块页面获取帖子列表，自动跳过置顶帖"""
-    logger.info("正在获取帖子列表: " + circle_url)
-    try:
-        page.goto(circle_url, timeout=90000, wait_until="domcontentloaded")
-    except Exception as e:
-        logger.warning("板块页面加载超时，尝试继续解析已加载内容: " + str(e))
-    page.wait_for_timeout(3000)
-
-    # 等待帖子列表加载
-    try:
-        page.wait_for_selector(".list-container .list .item", timeout=10000)
-    except Exception:
-        logger.error("帖子列表未加载，可能页面结构有变化")
-        return []
-
-    # 需要跳过的置顶帖标题关键词
-    SKIP_TITLE_KEYWORDS = [
-        "圈规", "答题系统反馈", "新圈规", "不允许乱转",
-    ]
-
-    items = page.query_selector_all(".list-container .list .item")
-    posts = []
-    skipped_pinned = 0
-    max_candidates = max(count * 8, count + 10)
-    for item in items[:max_candidates]:
-        try:
-            title_el = item.query_selector(".title")
-            if title_el:
-                href = title_el.get_attribute("href")
-                title = title_el.inner_text().strip()
-                if not (href and title):
-                    continue
-
-                # 检测置顶帖：通过 CSS 类或置顶标签
-                item_class = item.get_attribute("class") or ""
-                item_html = item.inner_html()[:500] if hasattr(item, "inner_html") else ""
-                is_pinned = (
-                    "sticky" in item_class.lower()
-                    or "pin" in item_class.lower()
-                    or "top" in item_class.lower()
-                    or "置顶" in item_html
-                    or "精华" in item_html
-                )
-
-                # 通过标题关键词跳过
-                title_matches_skip = any(kw in title for kw in SKIP_TITLE_KEYWORDS)
-
-                if is_pinned or title_matches_skip:
-                    skipped_pinned += 1
-                    logger.info("跳过置顶帖: " + title)
-                    continue
-
-                if not href.startswith("http"):
-                    href = "https://www.caimogu.cc" + href
-                posts.append({"url": href, "title": title})
-                if len(posts) >= max_candidates:
-                    break
-        except Exception:
-            continue
-
-    logger.info("跳过 %d 个置顶帖，获取到 %d 个普通帖子" % (skipped_pinned, len(posts)))
-    return posts
-
-
-def reply_to_post(page, post_url, config, logger):
-    """打开帖子并回复"""
-    logger.info("正在打开帖子: " + post_url)
-
-    try:
-        try:
-            page.goto(post_url, timeout=90000, wait_until="domcontentloaded")
-        except Exception as e:
-            logger.warning("帖子页面加载超时，尝试继续解析已加载内容: " + str(e))
-        page.wait_for_timeout(3000)
-
-        # 提取帖子标题（去掉页面标题中的后缀）
-        page_title = page.title()
-        title = re.sub(r'\s*-\s*.*$', '', page_title).strip()
-
-        # 提取帖子内容（用于AI生成评论）
-        content = ""
-        content_selectors = [".post-content", ".content", ".detail-content",
-                             ".post-body", ".text", ".post-detail-content"]
-        for selector in content_selectors:
-            try:
-                el = page.query_selector(selector)
-                if el:
-                    content = el.inner_text()[:500]
-                    break
-            except Exception:
-                continue
-
-        # 生成评论
-        comment = generate_comment(title, content, config)
-        logger.info("帖子标题: " + title)
-        if comment == "SKIP":
-            logger.info("判断结果: SKIP，帖子信息不足或硬回会像水贴，跳过此帖")
-            return False
-        logger.info("生成评论: " + comment)
-
-        # 滚动到页面底部（回复区域通常在底部）
-        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        page.wait_for_timeout(1500)
-
-        # 查找回复编辑器
-        editor = None
-        editor_selectors = [
-            ".ql-editor",
-            "#editor .ql-editor",
-            ".editor .ql-editor",
-            ".comment-editor .ql-editor",
-            "[contenteditable='true']",
-        ]
-
-        for selector in editor_selectors:
-            try:
-                editor = page.wait_for_selector(selector, timeout=5000)
-                if editor:
-                    logger.info("找到回复编辑器: " + selector)
-                    break
-            except Exception:
-                continue
-
-        if not editor:
-            # 可能需要先点击回复按钮才能显示编辑器
-            reply_btn_selectors = [
-                ".btn-reply-root", ".btn-reply", ".reply-btn",
-                'a:has-text("回复")', 'button:has-text("回复")'
-            ]
-            for selector in reply_btn_selectors:
-                try:
-                    btn = page.query_selector(selector)
-                    if btn:
-                        btn.click()
-                        page.wait_for_timeout(2000)
-                        break
-                except Exception:
-                    continue
-
-            # 再次尝试查找编辑器
-            for selector in editor_selectors:
-                try:
-                    editor = page.wait_for_selector(selector, timeout=5000)
-                    if editor:
-                        logger.info("找到回复编辑器: " + selector)
-                        break
-                except Exception:
-                    continue
-
-        if not editor:
-            logger.error("未找到回复输入框，跳过此帖子")
-            return False
-
-        # 点击编辑器并输入评论
-        editor.click()
-        page.wait_for_timeout(300)
-
-        # 尝试用 fill 输入
-        input_success = False
-        try:
-            editor.fill(comment)
-            input_success = True
-        except Exception:
-            pass
-
-        if not input_success:
-            # 备选方案：直接设置 Quill 编辑器内容
-            try:
-                page.evaluate(
-                    '(text) => { var ed = document.querySelector(".ql-editor"); '
-                    'if(ed) { ed.innerHTML = "<p>" + text + "</p>"; '
-                    'ed.dispatchEvent(new Event("input", {bubbles: true})); } }',
-                    comment
-                )
-                input_success = True
-            except Exception:
-                pass
-
-        if not input_success:
-            # 最后备选：用键盘逐字输入
-            try:
-                editor.click()
-                page.wait_for_timeout(200)
-                page.keyboard.type(comment, delay=50)
-                input_success = True
-            except Exception as e:
-                logger.error("输入评论失败: " + str(e))
-                return False
-
-        page.wait_for_timeout(500)
-        logger.info("评论已输入编辑器")
-
-        # 查找并点击提交按钮
-        submit_selectors = [
-            ".btn-reply-root",
-            'button:has-text("回复")',
-            'button:has-text("发表")',
-            'button:has-text("提交")',
-            ".submit-btn",
-            ".btn-publish",
-            ".btn-send",
-            'input[type="submit"]',
-        ]
-
-        submitted = False
-        for selector in submit_selectors:
-            try:
-                btn = page.query_selector(selector)
-                if btn:
-                    btn.click()
-                    submitted = True
-                    logger.info("点击提交按钮: " + selector)
-                    break
-            except Exception:
-                continue
-
-        if not submitted:
-            # 尝试用 Ctrl+Enter 提交
-            try:
-                page.keyboard.press("Control+Enter")
-                submitted = True
-                logger.info("通过 Ctrl+Enter 提交")
-            except Exception:
-                pass
-
-        if not submitted:
-            logger.error("未找到提交按钮")
-            return False
-
-        # 等待提交完成
-        page.wait_for_timeout(3000)
-
-        # 检查是否有错误提示
-        try:
-            error_el = page.query_selector('.error, .alert, .toast-error, .msg-error')
-            if error_el:
-                error_text = error_el.inner_text()
-                if error_text and len(error_text) > 2:
-                    logger.warning("页面提示: " + error_text)
-        except Exception:
-            pass
-
-        logger.info("回复提交完成")
+        logger.warning("检查登录状态时出错: %s", e)
         return True
 
-    except Exception as e:
-        logger.error("回复帖子时出错: " + str(e))
-        return False
-
+# ============================================================
+#  10. 签到流程
+# ============================================================
 
 def run_signin():
     """执行自动签到主流程"""
@@ -1035,11 +1038,10 @@ def run_signin():
 
     logger.info("=" * 50)
     logger.info("采蘑菇论坛自动签到开始")
-    logger.info("时间: " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    logger.info("时间: %s", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     logger.info("=" * 50)
 
-    # 检查登录状态文件
-    if not AUTH_FILE.exists():
+    if not PATHS["auth"].exists():
         logger.error("未找到登录状态文件！请先配置登录。")
         logger.error("请运行: python caimogu_signin.py --login")
         return
@@ -1054,75 +1056,79 @@ def run_signin():
     headless = config.get("headless", True)
     already_count = get_today_reply_count()
     if already_count >= reply_count:
-        logger.info("今天已经成功回复 " + str(already_count) + " 条，已达到目标，自动跳过。")
+        logger.info("今天已经成功回复 %d 条，已达到目标，自动跳过。", already_count)
         return
     remaining_count = reply_count - already_count
-    logger.info("今天已记录成功回复 " + str(already_count) + " 条，本次还需要回复 " + str(remaining_count) + " 条。")
+    logger.info("今天已记录成功回复 %d 条，本次还需要回复 %d 条。", already_count, remaining_count)
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
-        context = browser.new_context(
-            storage_state=str(AUTH_FILE),
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        browser, context = create_context(
+            p, headless=headless, storage_state=str(PATHS["auth"])
         )
-        page = context.new_page()
-
         try:
-            # 检查登录状态
+            page = context.new_page()
+
             if not check_login_status(page, logger):
                 logger.error("登录状态已失效！请重新配置登录。")
                 logger.error("请运行: python caimogu_signin.py --login")
-                browser.close()
                 return
 
             logger.info("登录状态有效")
 
-            # 获取帖子列表
-            posts = get_post_list(page, config["circle_url"], remaining_count, logger)
+            posts = get_post_list(page, config, remaining_count, logger)
             if not posts:
                 logger.error("未获取到帖子列表，签到失败")
-                browser.close()
                 return
 
-            # 逐个回复帖子
             success_count = already_count
             for i, post in enumerate(posts):
                 if success_count >= reply_count:
                     break
 
-                logger.info("--- 本次第 " + str(i + 1) + "/" + str(remaining_count) + " 个帖子，总进度 " + str(success_count) + "/" + str(reply_count) + " ---")
-                logger.info("标题: " + post["title"])
+                logger.info("--- 本次第 %d/%d 个帖子，总进度 %d/%d ---",
+                            i + 1, remaining_count, success_count, reply_count)
+                logger.info("标题: %s", post["title"])
 
                 if reply_to_post(page, post["url"], config, logger):
                     success_count += 1
-                    logger.info("回复成功 (" + str(success_count) + "/" + str(reply_count) + ")")
+                    logger.info("回复成功 (%d/%d)", success_count, reply_count)
                     mark_today_progress(success_count)
-                    # 随机延迟，模拟真实用户行为
                     if success_count < reply_count:
                         delay = random.randint(config["min_delay"], config["max_delay"])
-                        logger.info("等待 " + str(delay) + " 秒...")
+                        logger.info("等待 %d 秒...", delay)
                         time.sleep(delay)
                 else:
                     logger.warning("回复失败，尝试下一个帖子")
                     time.sleep(3)
 
             logger.info("=" * 50)
-            logger.info("签到完成！今天累计成功回复 " + str(success_count) + "/" + str(reply_count) + " 个帖子")
+            logger.info("签到完成！今天累计成功回复 %d/%d 个帖子", success_count, reply_count)
             logger.info("=" * 50)
             if success_count >= reply_count:
                 mark_done_today(success_count)
 
         except Exception as e:
-            logger.error("签到过程出错: " + str(e))
+            logger.error("签到过程出错: %s", e)
         finally:
+            context.close()
             browser.close()
 
     logger.info("脚本结束")
 
+# ============================================================
+#  11. 命令行入口
+# ============================================================
 
-# ============================================================
-#  命令行入口
-# ============================================================
+def show_help():
+    """显示帮助信息"""
+    print("采蘑菇论坛自动签到脚本")
+    print()
+    print("用法:")
+    print("  python caimogu_signin.py            执行自动签到")
+    print("  python caimogu_signin.py --login    配置登录（首次使用）")
+    print("  python caimogu_signin.py --test     测试评论生成效果")
+    print("  python caimogu_signin.py --help     显示帮助")
+
 
 def show_test_comments():
     """测试模式：预览评论生成效果"""
@@ -1147,17 +1153,16 @@ def show_test_comments():
         keyword = extract_keyword(title)
         decision = judge_replyability(title, content)
         comment = generate_comment(title, content, config)
-        char_count = len(re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9]', '', comment))
+        char_count = _comment_len(comment)
         logger.info("-" * 40)
-        logger.info("标题: " + title)
-        logger.info("正文: " + content)
-        logger.info("判断: " + decision)
-        logger.info("关键词: " + keyword)
+        logger.info("标题: %s", title)
+        logger.info("正文: %s", content)
+        logger.info("判断: %s", decision)
+        logger.info("关键词: %s", keyword)
         if comment == "SKIP":
             logger.info("结果: SKIP")
         else:
-            logger.info("评论: " + comment + " (" + str(char_count) + "字)")
-        # AI 模式下每条之间停顿2秒，避免触发429限流
+            logger.info("评论: %s (%d字)", comment, char_count)
         if config.get("deepseek_api_key") and i < len(test_posts) - 1:
             time.sleep(2)
     logger.info("-" * 40)
@@ -1165,20 +1170,18 @@ def show_test_comments():
 
 
 def main():
-    if "--login" in sys.argv or "--setup" in sys.argv:
-        setup_login()
-    elif "--test" in sys.argv:
-        show_test_comments()
-    elif "--help" in sys.argv or "-h" in sys.argv:
-        print("采蘑菇论坛自动签到脚本")
-        print()
-        print("用法:")
-        print("  python caimogu_signin.py            执行自动签到")
-        print("  python caimogu_signin.py --login    配置登录（首次使用）")
-        print("  python caimogu_signin.py --test     测试评论生成效果")
-        print("  python caimogu_signin.py --help     显示帮助")
-    else:
-        run_signin()
+    actions = {
+        "--login": setup_login,
+        "--setup": setup_login,
+        "--test":  show_test_comments,
+        "--help":  show_help,
+        "-h":      show_help,
+    }
+    action = next(
+        (actions[arg] for arg in sys.argv[1:] if arg in actions),
+        run_signin,
+    )
+    action()
 
 
 if __name__ == "__main__":
