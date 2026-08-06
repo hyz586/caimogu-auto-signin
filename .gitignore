@@ -1,0 +1,40 @@
+# 敏感文件 - 切勿提交
+auth_state.json
+replied_posts.json
+signin_log.txt
+run_log.txt
+last_command_output.txt
+
+# API Key 配置（每个人不同，不提交）
+# config.json 取消注释即可忽略
+# config.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Playwright 浏览器内核（体积大，不提交）
+playwright-browsers/
+
+# 压缩包
+*.zip
+*.rar
+*.7z
+
+# OS
+Thumbs.db
+.DS_Store
