@@ -1,0 +1,5 @@
+# BAT 文件使用 GBK 编码 + CRLF 换行，标记为 binary 防止 Git 修改编码和换行符
+*.bat binary
+
+# 使用说明.txt 同样使用 GBK 编码，防止 Git 修改
+使用说明.txt binary
