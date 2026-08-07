@@ -112,13 +112,23 @@ _MEANINGLESS_SUFFIXES = [
 
 _BAD_PARTS = ['一下', '目前', '有没有', '谁知道', '大家来', '展示', '这个游戏', '好玩的单']
 
-_BANNED_COMMENT_PARTS = [
+# 强禁词：全局过滤，出现即判废
+_HARD_BANNED_PARTS = [
     "感谢分享", "支持一下", "学到了", "坐等后续", "确实如此",
     "期待更新", "前排围观", "有道理", "这波可以",
-    "说得好", "支持楼主", "码住", "马克", "不错", "挺有意思",
-    "值得讨论", "内容质量", "参考价值", "信息量", "蹲一个靠谱",
+    "说得好", "支持楼主", "码住", "马克", "蹲一个靠谱",
     "666", "顶一下", "水帖", "占楼", "路过", "沙发",
+    "学习了", "感谢楼", "谢谢分享", "辛苦了",
 ]
+
+# 弱检测词：仅在评论开头出现时才过滤，避免误杀正文正常提及
+_WEAK_BANNED_PREFIXES = [
+    "值得讨论", "内容质量", "参考价值", "信息量", "不错",
+    "挺有意思", "有道理",
+]
+
+# 兼容旧引用
+_BANNED_COMMENT_PARTS = _HARD_BANNED_PARTS
 
 _SKIP_TITLE_PATTERNS = [
     r'^\s*签到\s*$', r'每日签到', r'打卡', r'水帖', r'路过',
@@ -146,78 +156,98 @@ _DETAIL_PATTERNS = [
 
 _REPLY_TEMPLATES = {
     "help": [
-        "{d}这里看着像关键卡点，先别急着重装",
-        "{d}这类问题最怕没提示，排查起来会很绕",
-        "先看{d}这一步，感觉更像问题源头",
-        "{d}如果能稳定复现的话，处理起来会清楚不少",
-        "说到{d}，我也踩过类似的坑，后来靠回档解决的",
-        "{d}这个细节挺关键，楼主能每次都触发吗",
-        "{d}这种情况建议先清下缓存试试，我之前也遇到过",
-        "{d}看着像兼容性问题，等个补丁应该就好了",
+        "{d}这步最怕没提示，我之前也卡在这，最后靠回档才过去",
+        "{d}看着像兼容性问题，等个补丁估计就好了，先别折腾",
+        "说到{d}，我遇到过一模一样的，清缓存没用，重装才解决",
+        "{d}要是能稳定复现就好办了，就怕随机触发排查到崩溃",
+        "{d}这种问题最恶心，没报错没日志，只能盲猜",
+        "我猜{d}是源头，楼主试试把这步跳过看会不会好",
+        "{d}这情况我熟，先别急着重装，试试点修复看看",
+        "{d}能每次都触发吗？如果随机出现的话大概率是内存泄漏",
     ],
     "regret": [
-        "{d}折腾到最后没成，听着就挺亏的",
-        "卡在{d}这里收场，确实挺可惜的",
-        "{d}这个细节比取消本身还扎眼",
-        "{d}拖到现在才没了，这个落差有点大",
-        "看到{d}被砍还是挺唏嘘的，毕竟等了这么久",
-        "{d}这一刀切下来，之前的投入全打水漂了",
-        "说实话{d}这个消息挺突然的，一点缓冲都没有",
-        "{d}到这里戛然而止，多少有点意难平",
+        "{d}可惜了，等了这么久就这结局，感觉之前的期待全白费了",
+        "看到{d}被砍说实话挺难受的，毕竟关注了那么长时间",
+        "{d}这种结局最搞心态，投入的精力直接打水漂",
+        "又是{d}这一刀，怎么感觉最近好项目都活不下来",
+        "{d}到这步戛然而止，就问之前预热的意义在哪",
+        "说实话{d}这消息一点缓冲都没有，太突然了",
+        "{d}这种收场方式真的让人不想再关注新项目了",
+        "卡在{d}收尾，怎么说呢，期待越大失望越大吧",
     ],
     "update": [
-        "{d}这项改动得看实机表现，公告不够判断",
-        "先看{d}这块有没有真变化，别急着下结论",
-        "{d}这里别只看公告措辞，实际体验更关键",
-        "{d}如果只是表面变化，玩起来会很尴尬",
-        "说实话{d}这个改动我挺期待的，就怕落地缩水",
-        "{d}这次更新看着有诚意，就看后续优化跟不跟得上了",
-        "{d}这个方向是对的，不过执行力度才是关键",
-        "光看{d}的描述还行，就怕实装之后又是另一回事",
+        "{d}方向没问题，就是别最后又缩水，不然期待全落空",
+        "{d}这块如果能影响玩法就好了，别只换皮不换骨",
+        "说实话{d}这改动我挺期待的，就怕实装之后又是另一回事",
+        "{d}看着有诚意，但执行力度才是关键，别光说不练",
+        "{d}这个改动要是真能落地就舒服了，就怕砍一半",
+        "我比较担心{d}会不会影响平衡，到时候又是一波调整",
+        "{d}方向是对的，就怕优化跟不上，先观望吧",
+        "光看{d}描述还行，等实机出来再判断，现在说啥都早",
     ],
     "recommend": [
-        "{d}这个偏好挺明确，按这个方向找会准些",
-        "按{d}这个方向筛，应该能少踩不少坑",
-        "{d}要是再耐玩一点，选择范围会舒服很多",
-        "只看{d}这个要求，其实能排掉一大批了",
-        "{d}这个方向不错，我再补充几个同类型的供参考",
-        "说到{d}，我还真玩过几个对口的，回头整理一下",
-        "{d}按这个标准找的话，选择面确实会窄不少",
-        "{d}这个需求挺典型的，建议直接搜这个关键词",
+        "{d}这个偏好挺明确，我玩过几个对口的，回头整理给你",
+        "按{d}这个方向找准没错，能少踩不少坑",
+        "{d}要是再耐玩一点就好了，不然选择面确实窄",
+        "说到{d}，我第一个想到的就是那几个老牌作品，稳",
+        "{d}这个需求其实挺好满足的，就是看你想不想接受老画面",
+        "{d}按这个标准筛的话选择面会窄不少，但质量有保障",
+        "{d}这个方向我还真玩过几个，主要看你能不能接受肝度",
+        "单看{d}这个要求，能排掉一大批了，剩下的都还行",
     ],
     "luck": [
-        "{d}这个结果看着挺拉仇恨，差一点就反转",
-        "看到{d}这种运气，很难不有点酸",
-        "{d}这一下比玄学还刺激，前面铺垫太长了",
-        "这种{d}截图最容易劝人手痒，太会卡点",
-        "{d}这波运气属实离谱，我十连全是保底",
-        "{d}看到这个结果我默默关掉了游戏，人比人气死人",
-        "{d}这运气没谁了，我抽了八十发才出",
-        "单看{d}这波操作，妥妥的欧皇附体啊",
+        "{d}这运气没谁了，我抽了八十发才出，人比人气死人",
+        "看到{d}这种结果默默关掉了游戏，差距太大了",
+        "{d}这波属实离谱，我十连全是保底，太酸了",
+        "这种{d}截图最容易劝人手痒，下次我也想试试",
+        "{d}比玄学还刺激，差一点就反转了，运气这东西真没道理",
+        "看到{d}我突然不想玩这游戏了，非酋不配拥有快乐",
+        "{d}这波操作妥妥的欧皇附体，建议去买彩票",
+        "单看{d}就知道这运气逆天，我连续保底三个月了都",
     ],
     "media": [
-        "{d}这个点拍不好会很别扭，改编压力不小",
-        "{d}放到真人版里挺考验取舍，不能只靠阵容",
-        "单看{d}就知道风险不小，方向比噱头重要",
-        "{d}这块比阵容更关键，处理不好很容易散",
-        "{d}这个细节改编好了是亮点，改砸了就是槽点",
-        "说到{d}，我觉得选角比剧情更决定成败",
-        "{d}这种设定搬到银幕上，观众接不接受是个问题",
-        "{d}改编的难点就在这里，原著粉肯定会盯着看",
+        "{d}这块改编好了是神作，改砸了就是灾难，风险太大",
+        "说到{d}，我觉得选角比剧情更决定成败，别只靠阵容",
+        "{d}这种设定搬到银幕上观众接不接受是个大问题",
+        "{d}改编的难点就在这，原著粉肯定会盯着不放",
+        "我比较担心{d}会不会为了大众化把核心改没了",
+        "{d}这个点处理不好整部就散了，不能只靠噱头",
+        "说实话{d}看着就压力大，改编这种东西吃力不讨好",
+        "{d}方向比噱头重要，别到时候光有阵容没有内容",
+    ],
+    "rumor": [
+        "{d}如果消息属实后续影响应该不小，但先等官方回应吧",
+        "{d}这种爆料看看就好，别太早下结论，之前翻车的还少吗",
+        "说实话{d}现在信息还有限，等正式消息比较稳",
+        "{d}如果是真的那确实炸裂，就怕最后又辟谣",
+        "{d}这种传闻我持观望态度，毕竟消息来源太模糊了",
+        "看到{d}先别激动，等实锤再说，假爆料太多了",
+        "{d}要是真延了那影响可太大了，但我赌大概率是误传",
+        "单看{d}这爆料可信度一般，等个官方公告比较靠谱",
+    ],
+    "sales": [
+        "{d}这成绩放在同类里已经不错了，说明玩家反馈还可以",
+        "{d}销量能起来说明确实有竞争力，后续能不能保持才是关键",
+        "说实话{d}这数据比预期好，看来口碑发酵起作用了",
+        "{d}这成绩不算意外，毕竟前期宣发到位了",
+        "{d}后续热度能不能稳住才重要，别又是一波流",
+        "看到{d}我觉得这个类型还是有市场的，别家可以跟进了",
+        "{d}这数据说明玩家用脚投票了，质量说话比营销管用",
+        "单看{d}确实亮眼，但长线运营才是考验，别高兴太早",
     ],
     "normal": [
-        "{d}这个细节比主楼更有意思，能接着聊",
-        "{d}这里看着像真正想聊的点，不算空泛",
-        "{d}这句比大段描述更直观，画面感更强",
-        "我更在意{d}这块怎么处理，影响会更明显",
-        "{d}这个角度挺新颖的，之前没往这方面想过",
-        "看完{d}觉得楼主观察力不错，这个点确实容易被忽略",
-        "{d}说到这个，我也有同感，是个值得展开的点",
-        "{d}这个信息量不小，细想的话影响挺深远的",
+        "{d}这块我比较在意，处理好了体验会好不少",
+        "说实话{d}这方向挺有意思的，之前没往这方面想过",
+        "{d}如果能落地的话影响会很明显，先观望吧",
+        "我比较担心{d}会不会有隐藏问题，等实测再说",
+        "{d}这个角度挺新颖的，细想的话确实值得关注",
+        "看到{d}我觉得可以期待一下，就怕最后虎头蛇尾",
+        "{d}细想的话影响挺深远的，不只是表面上那么简单",
+        "说到{d}我也有同感，这确实是个容易被忽略的点",
     ],
 }
 
-# 同义词库：随机替换常用词，增加回复多样性
+# 同义词库：仅替换描述词，不替换功能词（应该/还是/建议等会导致语义变怪）
 _SYNONYMS = {
     "看着": ["感觉", "瞧着"],
     "确实": ["真的", "属实"],
@@ -228,11 +258,9 @@ _SYNONYMS = {
     "觉得": ["感觉", "认为"],
     "不错": ["还行", "可以"],
     "关键": ["重要", "核心"],
-    "应该": ["建议", "最好"],
-    "还是": ["不妨", "干脆"],
     "挺可惜": ["蛮遗憾", "挺遗憾"],
     "说实话": ["老实讲", "说真的"],
-    "属离谱": ["太夸张", "太离谱"],
+    "属实离谱": ["太夸张", "太离谱"],
 }
 
 # ============================================================
@@ -297,13 +325,31 @@ def get_today_reply_count():
     return 0
 
 
-def mark_today_progress(post_count):
-    """记录进度，避免中断后重复回复"""
+def get_today_replied_ids():
+    """获取今天已回复的帖子ID列表，防止中断后重复回复"""
     data = load_json(PATHS["replied"], {})
-    data["last_run_date"] = date.today().isoformat()
+    today = date.today().isoformat()
+    if data.get("last_run_date") == today:
+        return data.get("today_post_ids", [])
+    return []
+
+
+def mark_today_progress(post_count, reply_count, post_id=None):
+    """记录进度，避免中断后重复回复；同时保存帖子ID"""
+    data = load_json(PATHS["replied"], {})
+    today = date.today().isoformat()
+    data["last_run_date"] = today
     data["last_run_posts"] = post_count
     data["last_run_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    data["status"] = "running" if post_count < DEFAULT_CONFIG["reply_count"] else "done"
+    data["status"] = "running" if post_count < reply_count else "done"
+
+    # 保存当天已回复的帖子ID列表
+    if post_id:
+        ids = data.get("today_post_ids", [])
+        if post_id not in ids:
+            ids.append(post_id)
+        data["today_post_ids"] = ids
+
     save_json(PATHS["replied"], data)
 
 
@@ -338,6 +384,10 @@ def detect_title_type(title):
         return "regret"
     if re.search(r'求助|请问|有没有|怎么|如何|为啥|为什么|闪退|报错|问题|卡住', title):
         return "help"
+    if re.search(r'爆料|传闻|泄露|消息人士|据说|内部消息|疑似|可能延期|或将于', title):
+        return "rumor"
+    if re.search(r'销量|销售额|突破|万套|百万|销量榜|成绩|首周|月销|出货量', title):
+        return "sales"
     if re.search(r'更新|版本|补丁|改动|上线|发布|公布|官宣|新增', title):
         return "update"
     if re.search(r'推荐|安利|好玩|入坑|值得买吗|买不买', title):
@@ -349,19 +399,44 @@ def detect_title_type(title):
     return "normal"
 
 
+# 常见游戏/作品名词库：优先匹配，避免硬截前4字产生无意义关键词
+_KNOWN_GAME_NAMES = [
+    "黑神话悟空", "黑神话", "原神", "崩坏星穹铁道", "星穹铁道", "崩坏",
+    "艾尔登法环", "老头环", "刺客信条", "GTA", "侠盗猎车手",
+    "塞尔达", "王国之泪", "旷野之息", "最终幻想", "勇者斗恶龙",
+    "怪物猎人", "怪猎", "荒野大镖客", "使命召唤", "战神",
+    "对马岛之魂", "赛博朋克", "巫师", "霍格沃茨", "帕鲁",
+    "幻兽帕鲁", "绝区零", "鸣潮", "明日方舟", "王者荣耀",
+    "和平精英", "永劫无间", "双人成行", "糖豆人", "光遇",
+    "原神", "崩坏三", "崩坏3", "蔚蓝档案", "妮姬",
+    "胜利女神", "无主之地", "生化危机", "寂静岭", "龙之信条",
+    "死亡搁浅", "往日不再", "地平线", "极限竞速",
+    "刀锋战士", "超人", "蝙蝠侠", "蜘蛛侠", "复仇者联盟",
+    "明日之子", "沙丘", "三体",
+]
+
+
 def extract_keyword(title):
-    """从帖子标题中提取关键词"""
+    """从帖子标题中提取关键词，优先匹配游戏名/专有名词"""
     title = re.sub(r'^【.*?】\s*', '', title)
     title = re.sub(r'^\[.*?\]\s*', '', title)
 
+    # 优先级1：书名号《》内的内容（通常是游戏名或作品名）
     match = re.search(r'《(.+?)》', title)
     if match and len(match.group(1)) >= 2:
         return match.group(1)[:6]
 
+    # 优先级1.5：引号内的内容
     match = re.search(r'[\u201c\u201d"\u300c\u300d\u300e\u300f](.+?)[\u201c\u201d"\u300c\u300d\u300e\u300f]', title)
     if match and len(match.group(1)) >= 2:
         return match.group(1)[:6]
 
+    # 优先级2：已知游戏/作品名词库
+    for name in _KNOWN_GAME_NAMES:
+        if name in title:
+            return name
+
+    # 优先级3：已知的复合关键词模式
     keyword_patterns = [
         r'单机游戏', r'登录闪退', r'闪退问题', r'游戏画面', r'刷图效果',
         r'版本更新', r'更新内容', r'抽卡出货', r'真人电影', r'档期原因',
@@ -374,6 +449,7 @@ def extract_keyword(title):
             if 2 <= len(found) <= 6:
                 return found
 
+    # 优先级4：清理后提取，但不再硬截前4字，而是取较长的中文连续片段
     clean = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9]', '', title)
 
     for prefix in _MEANINGLESS_PREFIXES:
@@ -386,16 +462,21 @@ def extract_keyword(title):
             clean = clean[:-len(suffix)]
             break
 
-    if len(clean) >= 4:
-        keyword = clean[:4]
+    # 从清理后的文本中提取2-6字的中文片段，取最长的
+    segments = re.findall(r'[\u4e00-\u9fa5]{2,6}', clean)
+    if segments:
+        # 取最长的片段，避免硬截前4字产生"黑神"这种碎片
+        best = max(segments, key=len)
         for bad in _BAD_PARTS:
-            if bad in keyword:
-                return ""
-        return keyword
-    elif len(clean) >= 2:
-        return clean
-    else:
-        return ""
+            if bad in best:
+                continue
+        if 2 <= len(best) <= 6:
+            return best
+
+    # 兜底：如果以上都没匹配到，取前2-4字
+    if len(clean) >= 2:
+        return clean[:min(4, len(clean))]
+    return ""
 
 
 def _strip_html_and_noise(text):
@@ -455,6 +536,8 @@ def judge_replyability(title, content):
     signal_patterns = [
         r'取消|延期|下架|停服|砍了|跳票',
         r'求助|请问|闪退|报错|卡住|失败|问题|怎么|为什么',
+        r'爆料|传闻|泄露|消息人士|据说|内部消息|疑似',
+        r'销量|突破|万套|百万|销量榜|成绩|首周|出货量',
         r'更新|版本|补丁|改动|新增|上线|发布',
         r'推荐|安利|入坑|好玩|单机|联机',
         r'抽卡|出货|掉落|运气|晒',
@@ -502,7 +585,7 @@ def _extract_detail(title, content):
     for chunk in chunks:
         if any(stop in chunk for stop in _DETAIL_STOP_WORDS):
             continue
-        if any(bad in chunk for bad in _BANNED_COMMENT_PARTS):
+        if any(bad in chunk for bad in _HARD_BANNED_PARTS):
             continue
         score = len(chunk)
         if content and chunk in content:
@@ -545,7 +628,11 @@ def _is_reply_valid(comment, title="", content=""):
     comment = _normalize_generated_comment(comment)
     if not comment or comment.upper() == "SKIP":
         return False
-    if any(part in comment for part in _BANNED_COMMENT_PARTS):
+    # 强禁词：全局过滤
+    if any(part in comment for part in _HARD_BANNED_PARTS):
+        return False
+    # 弱检测词：仅在开头出现时过滤，避免误杀正文正常提及
+    if any(comment.startswith(prefix) for prefix in _WEAK_BANNED_PREFIXES):
         return False
     length = _comment_len(comment)
     if not (15 <= length <= 40):
@@ -625,15 +712,16 @@ def generate_comment_ai(title, content, api_key, base_url, model):
 
         content_summary = _strip_html_and_noise(content)[:700] if content else ""
         prompt = (
-            "你是一个论坛用户，正在浏览帖子。请根据标题和正文，写一条真实的回复。\n\n"
+            "你是一个游戏论坛用户，正在浏览帖子。请根据标题和正文，写一条真实的回复。\n\n"
             "规则：\n"
-            "- 抓住帖子里一个具体细节来回复，不要泛泛而谈\n"
+            "- 从玩家立场出发回复，表达个人态度（担忧、期待、吐槽、对比、怀疑），不要像在评价新闻\n"
+            "- 抓住帖子里一个具体细节来回复，可以推测影响、表达预期\n"
             "- 语气口语化，像真人在闲聊，可以吐槽、提问、补充\n"
             "- 15到40个字，别太短也别太长\n"
             "- 绝对不要用这些套话：感谢分享、支持一下、学到了、坐等后续、确实如此、期待更新、前排围观、有道理、这波可以、说得好、支持楼主、码住、马克\n"
             "- 不要假装亲身经历过\n"
-            "- 不要总结帖子内容\n"
-            "- 不要重复标题原话\n\n"
+            "- 不要总结帖子内容或复述标题\n"
+            "- 不要用\"这个细节\"\"这个改动\"\"这个消息\"开头\n\n"
             "如果帖子内容太少、没法自然接话，只回复两个字母：SKIP\n"
             "能回复就直接输出回复内容，不要加任何前缀、编号、解释\n"
         )
@@ -694,8 +782,7 @@ def generate_comment_ai(title, content, api_key, base_url, model):
                 logger.warning("AI 重试仍为空，回退模板")
                 return generate_comment_template(title, content)
 
-        _HARD_BANNED = ["感谢分享", "支持一下", "学到了", "坐等后续", "期待更新", "前排围观"]
-        if any(part in comment for part in _HARD_BANNED):
+        if any(part in comment for part in _HARD_BANNED_PARTS):
             logger.warning("AI 回复含套话，回退模板: %s", comment)
             return generate_comment_template(title, content)
 
@@ -1093,9 +1180,17 @@ def run_signin():
                 return
 
             success_count = already_count
+            replied_ids = get_today_replied_ids()
             for i, post in enumerate(posts):
                 if success_count >= reply_count:
                     break
+
+                # 跳过今天已回复过的帖子（防止中断后重复回复）
+                post_id = re.search(r'/(\d+)\.html', post["url"])
+                post_id = post_id.group(1) if post_id else post["url"]
+                if post_id in replied_ids:
+                    logger.info("跳过今天已回复的帖子: %s", post["title"])
+                    continue
 
                 logger.info("--- 本次第 %d/%d 个帖子，总进度 %d/%d ---",
                             i + 1, remaining_count, success_count, reply_count)
@@ -1104,7 +1199,7 @@ def run_signin():
                 if reply_to_post(page, post["url"], config, logger):
                     success_count += 1
                     logger.info("回复成功 (%d/%d)", success_count, reply_count)
-                    mark_today_progress(success_count)
+                    mark_today_progress(success_count, reply_count, post_id)
                     if success_count < reply_count:
                         delay = random.randint(config["min_delay"], config["max_delay"])
                         logger.info("等待 %d 秒...", delay)
@@ -1158,6 +1253,8 @@ def show_test_comments():
         ("这个游戏画面真的绝了分享给大家看看", "雨天场景的反光做得很明显，截图看着比白天舒服。"),
         ("有没有人遇到登录闪退的问题求助", "点登录后窗口直接消失，没有弹错误提示。"),
         ("今天抽卡出货了分享一下好运", "十连最后一发才出的，前面全是蓝光。"),
+        ("爆料：《GTA6》可能延期至2026年发售", "据业内人士透露，Rockstar内部开发进度不及预期。"),
+        ("《黑神话悟空》海外销量突破千万套", "发售首月海外销量已突破1000万套，成绩远超预期。"),
         ("每日签到", "如题"),
     ]
 
