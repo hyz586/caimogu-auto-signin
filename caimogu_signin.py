@@ -1012,10 +1012,10 @@ def reply_to_post(page, post_url, config, logger):
 
         # 提取帖子信息
         title, content = extract_post_info(page)
+        logger.info("帖子标题: %s", title)
 
         # 生成评论（纯逻辑，不涉及页面操作）
         comment = generate_comment(title, content, config)
-        logger.info("帖子标题: %s", title)
         if comment == "SKIP":
             logger.info("判断结果: SKIP，跳过此帖")
             return False
@@ -1261,11 +1261,11 @@ def show_test_comments():
     for i, (title, content) in enumerate(test_posts):
         keyword = extract_keyword(title)
         decision = judge_replyability(title, content)
-        comment = generate_comment(title, content, config)
-        char_count = _comment_len(comment)
         logger.info("-" * 40)
         logger.info("标题: %s", title)
         logger.info("正文: %s", content)
+        comment = generate_comment(title, content, config)
+        char_count = _comment_len(comment)
         logger.info("判断: %s", decision)
         logger.info("关键词: %s", keyword)
         if comment == "SKIP":
