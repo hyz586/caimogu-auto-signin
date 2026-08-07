@@ -96,49 +96,8 @@ SELECTORS = {
 SKIP_PIN_KEYWORDS = ["圈规", "答题系统反馈", "新圈规", "不允许乱转"]
 
 # ============================================================
-#  2. 评论模板与关键词常量
+#  2. 关键词提取与过滤常量
 # ============================================================
-
-COMMENT_TEMPLATES = [
-    "{keyword}这个确实挺有意思的",
-    "看到{keyword}了感觉还不错哦",
-    "{keyword}这话题值得聊一聊哈",
-    "楼主说的{keyword}我也关注了",
-    "关于{keyword}学习了感谢哈",
-    "{keyword}看起来挺有意思的呢",
-    "这个{keyword}确实有道理啊",
-    "{keyword}深有同感顶一个楼主",
-    "感谢分享{keyword}相关内容哈",
-    "{keyword}这个挺实用的马克了",
-    "说到{keyword}我就来精神了哈",
-    "{keyword}这波操作可以的样子",
-    "看完{keyword}觉得挺靠谱的呢",
-    "{keyword}确实是这样没毛病啊",
-    "mark一下{keyword}回头细看看",
-    "{keyword}这个信息很有用感谢",
-    "关于{keyword}我也来说两句",
-    "{keyword}这个观点我比较赞同",
-    "每次看到{keyword}都想点进来",
-    "{keyword}这内容质量挺高支持",
-]
-
-UNIVERSAL_COMMENTS = [
-    "这帖子内容不错挺有参考价值",
-    "感谢楼主分享学到了不少东西",
-    "这个话题确实值得讨论一下哈",
-    "看完觉得挺有收获的感谢分享",
-    "楼主说得有道理支持一下你了",
-    "这内容质量挺高的马克收藏了",
-    "正好需要这个信息感谢楼主哈",
-    "挺有意思的帖子顶一下楼主哈",
-    "学到了新知识感谢楼主分享哈",
-    "这帖子说到了点子上支持一下",
-    "内容挺实用的感谢分享收藏了",
-    "看完了感觉挺不错支持楼主哈",
-    "好帖子必须顶一下感谢分享哈",
-    "这分享挺有用的谢谢楼主了哈",
-    "帖子写得挺详细的支持一个哈",
-]
 
 _MEANINGLESS_PREFIXES = [
     '大家来展示一下', '有没有人遇到', '求推荐几款', '请问一下大家',
@@ -157,7 +116,8 @@ _BANNED_COMMENT_PARTS = [
     "感谢分享", "支持一下", "学到了", "坐等后续", "确实如此",
     "期待更新", "前排围观", "有道理", "这波可以",
     "说得好", "支持楼主", "码住", "马克", "不错", "挺有意思",
-    "值得讨论", "内容质量", "参考价值", "信息量", "蹲一个靠谱"
+    "值得讨论", "内容质量", "参考价值", "信息量", "蹲一个靠谱",
+    "666", "顶一下", "水帖", "占楼", "路过", "沙发",
 ]
 
 _SKIP_TITLE_PATTERNS = [
@@ -187,46 +147,92 @@ _DETAIL_PATTERNS = [
 _REPLY_TEMPLATES = {
     "help": [
         "{d}这里看着像关键卡点，先别急着重装",
-        "{d}这类问题最怕没提示，排查会很绕",
-        "{d}如果能稳定复现，处理起来会清楚些",
+        "{d}这类问题最怕没提示，排查起来会很绕",
         "先看{d}这一步，感觉更像问题源头",
+        "{d}如果能稳定复现的话，处理起来会清楚不少",
+        "说到{d}，我也踩过类似的坑，后来靠回档解决的",
+        "{d}这个细节挺关键，楼主能每次都触发吗",
+        "{d}这种情况建议先清下缓存试试，我之前也遇到过",
+        "{d}看着像兼容性问题，等个补丁应该就好了",
     ],
     "regret": [
         "{d}折腾到最后没成，听着就挺亏的",
-        "{d}拖到现在才没了，这个落差有点大",
         "卡在{d}这里收场，确实挺可惜的",
         "{d}这个细节比取消本身还扎眼",
+        "{d}拖到现在才没了，这个落差有点大",
+        "看到{d}被砍还是挺唏嘘的，毕竟等了这么久",
+        "{d}这一刀切下来，之前的投入全打水漂了",
+        "说实话{d}这个消息挺突然的，一点缓冲都没有",
+        "{d}到这里戛然而止，多少有点意难平",
     ],
     "update": [
         "{d}这项改动得看实机表现，公告不够判断",
-        "{d}如果只是表面变化，玩起来会很尴尬",
         "先看{d}这块有没有真变化，别急着下结论",
         "{d}这里别只看公告措辞，实际体验更关键",
+        "{d}如果只是表面变化，玩起来会很尴尬",
+        "说实话{d}这个改动我挺期待的，就怕落地缩水",
+        "{d}这次更新看着有诚意，就看后续优化跟不跟得上了",
+        "{d}这个方向是对的，不过执行力度才是关键",
+        "光看{d}的描述还行，就怕实装之后又是另一回事",
     ],
     "recommend": [
         "{d}这个偏好挺明确，按这个方向找会准些",
         "按{d}这个方向筛，应该能少踩不少坑",
         "{d}要是再耐玩一点，选择范围会舒服很多",
         "只看{d}这个要求，其实能排掉一大批了",
+        "{d}这个方向不错，我再补充几个同类型的供参考",
+        "说到{d}，我还真玩过几个对口的，回头整理一下",
+        "{d}按这个标准找的话，选择面确实会窄不少",
+        "{d}这个需求挺典型的，建议直接搜这个关键词",
     ],
     "luck": [
         "{d}这个结果看着挺拉仇恨，差一点就反转",
         "看到{d}这种运气，很难不有点酸",
         "{d}这一下比玄学还刺激，前面铺垫太长了",
         "这种{d}截图最容易劝人手痒，太会卡点",
+        "{d}这波运气属实离谱，我十连全是保底",
+        "{d}看到这个结果我默默关掉了游戏，人比人气死人",
+        "{d}这运气没谁了，我抽了八十发才出",
+        "单看{d}这波操作，妥妥的欧皇附体啊",
     ],
     "media": [
         "{d}这个点拍不好会很别扭，改编压力不小",
         "{d}放到真人版里挺考验取舍，不能只靠阵容",
         "单看{d}就知道风险不小，方向比噱头重要",
         "{d}这块比阵容更关键，处理不好很容易散",
+        "{d}这个细节改编好了是亮点，改砸了就是槽点",
+        "说到{d}，我觉得选角比剧情更决定成败",
+        "{d}这种设定搬到银幕上，观众接不接受是个问题",
+        "{d}改编的难点就在这里，原著粉肯定会盯着看",
     ],
     "normal": [
         "{d}这个细节比主楼更有意思，能接着聊",
         "{d}这里看着像真正想聊的点，不算空泛",
         "{d}这句比大段描述更直观，画面感更强",
         "我更在意{d}这块怎么处理，影响会更明显",
+        "{d}这个角度挺新颖的，之前没往这方面想过",
+        "看完{d}觉得楼主观察力不错，这个点确实容易被忽略",
+        "{d}说到这个，我也有同感，是个值得展开的点",
+        "{d}这个信息量不小，细想的话影响挺深远的",
     ],
+}
+
+# 同义词库：随机替换常用词，增加回复多样性
+_SYNONYMS = {
+    "看着": ["感觉", "瞧着"],
+    "确实": ["真的", "属实"],
+    "挺": ["蛮", "相当"],
+    "有点": ["略微", "稍许"],
+    "不过": ["但是", "然而"],
+    "其实": ["说到底", "老实说"],
+    "觉得": ["感觉", "认为"],
+    "不错": ["还行", "可以"],
+    "关键": ["重要", "核心"],
+    "应该": ["建议", "最好"],
+    "还是": ["不妨", "干脆"],
+    "挺可惜": ["蛮遗憾", "挺遗憾"],
+    "说实话": ["老实讲", "说真的"],
+    "属离谱": ["太夸张", "太离谱"],
 }
 
 # ============================================================
@@ -324,16 +330,6 @@ def _normalize_comment(text):
     text = re.sub(r'\s+', '', text)
     text = text.strip('，。！？!?、；; ')
     return text
-
-
-def _valid_comments(candidates):
-    """过滤出 10 到 20 字之间的评论"""
-    result = []
-    for item in candidates:
-        item = _normalize_comment(item)
-        if 10 <= _comment_len(item) <= 20:
-            result.append(item)
-    return result
 
 
 def detect_title_type(title):
@@ -552,7 +548,7 @@ def _is_reply_valid(comment, title="", content=""):
     if any(part in comment for part in _BANNED_COMMENT_PARTS):
         return False
     length = _comment_len(comment)
-    if not (15 <= length <= 35):
+    if not (15 <= length <= 40):
         return False
     compact_title = re.sub(r'\s+', '', title or "")
     if compact_title and comment == compact_title:
@@ -560,6 +556,14 @@ def _is_reply_valid(comment, title="", content=""):
     if "我也" in comment and not re.search(r'求助|请问|有没有|问题|推荐', title or ""):
         return False
     return True
+
+
+def _apply_synonyms(text):
+    """随机替换同义词，增加回复多样性"""
+    for word, subs in _SYNONYMS.items():
+        if word in text and random.random() < 0.4:
+            text = text.replace(word, random.choice(subs), 1)
+    return text
 
 
 def generate_comment_template(title, content=""):
@@ -572,10 +576,18 @@ def generate_comment_template(title, content=""):
     if not detail:
         return "SKIP"
 
+    keyword = extract_keyword(title) or ""
     title_type = detect_title_type((title or "") + " " + (content or "")[:120])
     templates = _REPLY_TEMPLATES.get(title_type, _REPLY_TEMPLATES["normal"])
-    candidates = [tpl.replace("{d}", detail) for tpl in random.sample(templates, len(templates))]
-    valid = [_normalize_generated_comment(x) for x in candidates if _is_reply_valid(x, title, content)]
+
+    # 打乱模板顺序，填充插槽并应用同义词随机化
+    candidates = []
+    for tpl in random.sample(templates, len(templates)):
+        filled = tpl.replace("{d}", detail).replace("{kw}", keyword)
+        filled = _apply_synonyms(filled)
+        candidates.append(filled)
+
+    valid = [c for c in candidates if _is_reply_valid(c, title, content)]
     if valid:
         return random.choice(valid)
     return "SKIP"
