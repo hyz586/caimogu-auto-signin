@@ -18,7 +18,7 @@ import random
 import time
 import sys
 import logging
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from pathlib import Path
 
 # ============================================================
@@ -285,8 +285,36 @@ def save_json(path, data):
 #  4. 日志
 # ============================================================
 
+def clean_old_logs(max_days=7):
+    """清理超过指定天数的旧日志，仅保留最近 max_days 天的记录"""
+    log_path = PATHS["log"]
+    if not log_path.exists():
+        return
+    try:
+        cutoff = datetime.now() - timedelta(days=max_days)
+        with open(log_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        kept = []
+        keep_current_block = False
+        for line in lines:
+            try:
+                ts = datetime.strptime(line[:19], "%Y-%m-%d %H:%M:%S")
+                keep_current_block = ts >= cutoff
+            except ValueError:
+                pass
+            if keep_current_block:
+                kept.append(line)
+        if len(kept) == len(lines):
+            return
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.writelines(kept)
+    except Exception:
+        pass
+
+
 def setup_logging():
     """配置日志（同时输出到文件和控制台）"""
+    clean_old_logs(max_days=7)
     logger = logging.getLogger("caimogu")
     logger.setLevel(logging.INFO)
     if logger.handlers:
