@@ -1358,6 +1358,16 @@ def check_login_status(page, logger):
 #  10. 签到流程
 # ============================================================
 
+def show_notification(title, message):
+    """显示 Windows 弹窗通知（后台签到失败时提醒用户）"""
+    try:
+        import ctypes
+        # MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST = 0x30 | 0x10000 | 0x40000
+        ctypes.windll.user32.MessageBoxW(0, message, title, 0x30 | 0x10000 | 0x40000)
+    except Exception:
+        pass
+
+
 def run_signin():
     """执行自动签到主流程"""
     logger = setup_logging()
@@ -1377,6 +1387,7 @@ def run_signin():
         from playwright.sync_api import sync_playwright
     except ImportError:
         logger.error("未安装 Playwright，请先运行 install.bat")
+        show_notification("采蘑菇签到失败", "未安装 Playwright，请先运行 install.bat")
         return
 
     reply_count = config.get("reply_count", 3)
@@ -1398,6 +1409,7 @@ def run_signin():
             if not check_login_status(page, logger):
                 logger.error("登录状态已失效！请重新配置登录。")
                 logger.error("请运行: python caimogu_signin.py --login")
+                show_notification("采蘑菇签到失败", "登录状态已失效！\n\n请运行以下命令重新登录：\npython caimogu_signin.py --login")
                 return
 
             logger.info("登录状态有效")
@@ -1405,10 +1417,12 @@ def run_signin():
             posts = get_post_list(page, config, remaining_count, logger)
             if not posts:
                 logger.error("未获取到帖子列表，签到失败")
+                show_notification("采蘑菇签到失败", "未获取到帖子列表，可能是网络问题或页面结构变化。")
                 return
 
             success_count = already_count
             replied_ids = get_today_replied_ids()
+            auth_expired = False
             for i, post in enumerate(posts):
                 if success_count >= reply_count:
                     break
@@ -1428,6 +1442,7 @@ def run_signin():
 
                 if result == "AUTH_EXPIRED":
                     logger.error("登录已过期，请重新运行 --login 配置登录后再次签到")
+                    auth_expired = True
                     break
                 elif result:
                     success_count += 1
@@ -1456,9 +1471,22 @@ def run_signin():
             logger.info("=" * 50)
             if success_count >= reply_count:
                 mark_done_today(success_count)
+            else:
+                # 签到未完成，弹窗提醒用户
+                if auth_expired:
+                    show_notification(
+                        "采蘑菇签到失败 - 登录已过期",
+                        "登录令牌已过期，签到中止。\n\n请运行以下命令重新登录：\npython caimogu_signin.py --login"
+                    )
+                else:
+                    show_notification(
+                        "采蘑菇签到未完成",
+                        f"今天仅成功回复 {success_count}/{reply_count} 个帖子。\n\n请查看签到日志了解详情：\n{PATHS['log']}"
+                    )
 
         except Exception as e:
             logger.error("签到过程出错: %s", e)
+            show_notification("采蘑菇签到出错", f"签到过程发生异常：{e}\n\n请查看签到日志了解详情：\n{PATHS['log']}")
         finally:
             # 保存浏览器状态（可能包含服务器刷新的 cookie，延长登录有效期）
             try:
