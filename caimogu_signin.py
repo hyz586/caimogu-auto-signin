@@ -964,32 +964,34 @@ def find_editor(page, logger):
 
 
 def input_comment(page, editor, comment, logger):
-    """输入评论到编辑器，依次尝试 fill → Quill API → execCommand → keyboard.type"""
-    # 每次操作前都清除弹窗，并用JS focus编辑器（避免click被弹窗拦截）
-    def focus_editor():
+    """输入评论到编辑器，依次尝试 Quill API → keyboard → fill → execCommand"""
+
+    def get_editor_text():
+        try:
+            return page.evaluate('() => { var ed = document.querySelector(".ql-editor"); return ed ? ed.innerText.trim() : ""; }')
+        except Exception:
+            return ""
+
+    def focus_quill():
+        """用 Quill API 聚焦编辑器（比 DOM .focus() 更可靠）"""
         dismiss_popup(page, logger)
         try:
-            page.evaluate('() => { var ed = document.querySelector(".ql-editor"); if(ed) ed.focus(); }')
+            page.evaluate(
+                '() => { var ed = document.querySelector(".ql-editor"); '
+                'if(!ed) return; '
+                'var container = ed.closest(".ql-container"); '
+                'if(container && window.Quill) { '
+                '  var quill = Quill.find(container); '
+                '  if(quill) { quill.focus(); return; } '
+                '} '
+                'ed.focus(); }'
+            )
             page.wait_for_timeout(200)
         except Exception:
             pass
 
-    focus_editor()
-
-    # 方式一：fill
-    try:
-        editor.fill(comment, timeout=5000)
-        page.wait_for_timeout(500)
-        actual = page.evaluate('() => { var ed = document.querySelector(".ql-editor"); return ed ? ed.innerText.trim() : ""; }')
-        if actual and len(actual) >= 5:
-            logger.info("评论已输入编辑器(fill)")
-            return True
-        raise Exception("fill后内容为空")
-    except Exception:
-        pass
-
-    # 方式二：通过 Quill API 设置内容（确保内部状态更新）
-    focus_editor()
+    # 方式一：Quill API setText（最可靠，直接更新 Quill 内部状态）
+    focus_quill()
     try:
         result = page.evaluate(
             '(text) => {'
@@ -999,7 +1001,8 @@ def input_comment(page, editor, comment, logger):
             '  if(container && window.Quill) { '
             '    var quill = Quill.find(container); '
             '    if(quill) { '
-            '      quill.setText(text); '
+            '      quill.setContents([{insert: text}]); '
+            '      quill.setSelection(text.length, 0); '
             '      ed.dispatchEvent(new Event("input", {bubbles: true})); '
             '      ed.dispatchEvent(new Event("change", {bubbles: true})); '
             '      return true; '
@@ -1011,52 +1014,85 @@ def input_comment(page, editor, comment, logger):
         )
         if result:
             page.wait_for_timeout(300)
-            # 模拟键盘输入触发完整DOM事件链，确保提交按钮启用
-            focus_editor()
-            page.keyboard.press("End")
-            page.wait_for_timeout(50)
-            page.keyboard.type(" ", delay=30)
-            page.keyboard.press("Backspace")
-            page.wait_for_timeout(500)
-            actual = page.evaluate('() => { var ed = document.querySelector(".ql-editor"); return ed ? ed.innerText.trim() : ""; }')
+            actual = get_editor_text()
             if actual and len(actual) >= 5:
                 logger.info("评论已输入编辑器(Quill API)")
                 return True
     except Exception:
         pass
 
-    # 方式三：execCommand 选中并插入文本
-    focus_editor()
+    # 方式二：键盘逐字输入（触发完整DOM事件链）
+    focus_quill()
     try:
-        page.evaluate('() => { var ed = document.querySelector(".ql-editor"); if(ed) { ed.focus(); var range = document.createRange(); range.selectNodeContents(ed); var sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range); } }')
+        page.evaluate(
+            '() => { var ed = document.querySelector(".ql-editor"); '
+            'if(ed) { ed.focus(); var range = document.createRange(); '
+            'range.selectNodeContents(ed); var sel = window.getSelection(); '
+            'sel.removeAllRanges(); sel.addRange(range); } }'
+        )
+        page.wait_for_timeout(100)
+        page.keyboard.press("Backspace")
+        page.wait_for_timeout(200)
+        page.keyboard.type(comment, delay=50)
+        page.wait_for_timeout(500)
+        actual = get_editor_text()
+        if actual and len(actual) >= 5:
+            logger.info("评论已输入编辑器(keyboard)")
+            return True
+    except Exception:
+        pass
+
+    # 方式三：fill
+    dismiss_popup(page, logger)
+    try:
+        editor.fill(comment, timeout=5000)
+        page.wait_for_timeout(500)
+        actual = get_editor_text()
+        if actual and len(actual) >= 5:
+            logger.info("评论已输入编辑器(fill)")
+            return True
+    except Exception:
+        pass
+
+    # 方式四：execCommand 选中并插入文本
+    focus_quill()
+    try:
+        page.evaluate(
+            '() => { var ed = document.querySelector(".ql-editor"); '
+            'if(ed) { ed.focus(); var range = document.createRange(); '
+            'range.selectNodeContents(ed); var sel = window.getSelection(); '
+            'sel.removeAllRanges(); sel.addRange(range); } }'
+        )
         page.wait_for_timeout(100)
         page.evaluate('(text) => { document.execCommand("insertText", false, text); }', comment)
         page.wait_for_timeout(500)
-        actual = page.evaluate('() => { var ed = document.querySelector(".ql-editor"); return ed ? ed.innerText.trim() : ""; }')
+        actual = get_editor_text()
         if actual and len(actual) >= 5:
             logger.info("评论已输入编辑器(execCommand)")
             return True
     except Exception:
         pass
 
-    # 方式四：键盘逐字输入
-    focus_editor()
-    try:
-        page.keyboard.type(comment, delay=50)
-        page.wait_for_timeout(500)
-        actual = page.evaluate('() => { var ed = document.querySelector(".ql-editor"); return ed ? ed.innerText.trim() : ""; }')
-        if actual and len(actual) >= 5:
-            logger.info("评论已输入编辑器(keyboard)")
-            return True
-        logger.error("键盘输入后内容仍为空")
-        return False
-    except Exception as e:
-        logger.error("输入评论失败: %s", e)
-        return False
+    logger.error("所有输入方式均失败")
+    return False
 
 
 def dismiss_popup(page, logger):
     """关闭 SweetAlert2 等遮罩弹窗，防止遮挡编辑器与提交按钮"""
+    # 先读取弹窗内容（用于诊断提交失败原因）
+    try:
+        info = page.evaluate(
+            '() => { var c = document.querySelector(".swal2-container"); '
+            'if(!c) return null; '
+            'var t = c.querySelector(".swal2-title"); '
+            'var h = c.querySelector(".swal2-html-container"); '
+            'return { title: t ? t.innerText.trim() : "", content: h ? h.innerText.trim() : "" }; }'
+        )
+        if info and (info.get("title") or info.get("content")):
+            logger.info("页面弹窗: [%s] %s", info.get("title", ""), info.get("content", ""))
+    except Exception:
+        pass
+
     # 优先用 Escape 与按钮关闭
     try:
         page.keyboard.press("Escape")
@@ -1112,8 +1148,7 @@ def submit_reply(page, logger):
         try:
             btn.click()
             logger.info("点击提交按钮: %s", sel)
-            page.wait_for_timeout(500)
-            dismiss_popup(page, logger)
+            page.wait_for_timeout(2000)
             return True
         except Exception as e:
             logger.error("点击提交按钮失败: %s", e)
@@ -1121,8 +1156,7 @@ def submit_reply(page, logger):
             try:
                 page.evaluate("(el) => el.click()", btn)
                 logger.info("JS 兜底点击提交按钮: %s", sel)
-                page.wait_for_timeout(500)
-                dismiss_popup(page, logger)
+                page.wait_for_timeout(2000)
                 return True
             except Exception as e2:
                 logger.error("JS 兜底点击仍失败: %s", e2)
@@ -1132,8 +1166,7 @@ def submit_reply(page, logger):
     try:
         page.keyboard.press("Control+Enter")
         logger.info("通过 Ctrl+Enter 提交")
-        page.wait_for_timeout(500)
-        dismiss_popup(page, logger)
+        page.wait_for_timeout(2000)
         return True
     except Exception:
         logger.error("未找到提交按钮")
@@ -1185,6 +1218,21 @@ def reply_to_post(page, post_url, config, logger):
         # 等待提交完成并验证（最多重试3次）
         for attempt in range(3):
             page.wait_for_timeout(3000)
+
+            # 先检查 SweetAlert2 弹窗内容（可能包含"未登录"等关键错误）
+            try:
+                swal_title = page.evaluate(
+                    '() => { var t = document.querySelector(".swal2-container .swal2-title"); '
+                    'return t ? t.innerText.trim() : ""; }'
+                )
+                if swal_title:
+                    logger.warning("提交后弹窗提示: %s", swal_title)
+                    if "登录" in swal_title or "登陆" in swal_title:
+                        logger.error("登录状态已失效！请重新运行 --login 配置登录")
+                        return "AUTH_EXPIRED"
+            except Exception:
+                pass
+
             dismiss_popup(page, logger)
 
             # 检查错误提示
@@ -1269,6 +1317,23 @@ def setup_login():
 
 def check_login_status(page, logger):
     """检查登录状态是否有效"""
+    # 先检查 auth_state.json 中 cmg_token 是否已过期
+    try:
+        with open(str(PATHS["auth"]), 'r', encoding='utf-8') as f:
+            state = json.load(f)
+        for cookie in state.get('cookies', []):
+            if cookie.get('name') == 'cmg_token':
+                expires = cookie.get('expires', -1)
+                if expires > 0:
+                    exp_time = datetime.fromtimestamp(expires)
+                    if exp_time < datetime.now():
+                        logger.error("登录令牌(cmg_token)已于 %s 过期", exp_time.strftime('%Y-%m-%d %H:%M'))
+                        return False
+                    logger.info("登录令牌有效期至: %s", exp_time.strftime('%Y-%m-%d %H:%M'))
+                break
+    except Exception as e:
+        logger.warning("检查令牌过期时间时出错: %s", e)
+
     try:
         page.goto("https://www.caimogu.cc/", timeout=60000, wait_until="domcontentloaded")
         page.wait_for_timeout(2000)
@@ -1356,7 +1421,12 @@ def run_signin():
                             i + 1, remaining_count, success_count, reply_count)
                 logger.info("标题: %s", post["title"])
 
-                if reply_to_post(page, post["url"], config, logger):
+                result = reply_to_post(page, post["url"], config, logger)
+
+                if result == "AUTH_EXPIRED":
+                    logger.error("登录已过期，请重新运行 --login 配置登录后再次签到")
+                    break
+                elif result:
                     success_count += 1
                     logger.info("回复成功 (%d/%d)", success_count, reply_count)
                     mark_today_progress(success_count, reply_count, post_id)
@@ -1366,6 +1436,16 @@ def run_signin():
                         time.sleep(delay)
                 else:
                     logger.warning("回复失败，尝试下一个帖子")
+                    # 检查页面是否崩溃，若崩溃则创建新页面
+                    try:
+                        page.evaluate("1")
+                    except Exception:
+                        logger.warning("页面已崩溃，创建新页面继续")
+                        try:
+                            page.close()
+                        except Exception:
+                            pass
+                        page = context.new_page()
                     time.sleep(3)
 
             logger.info("=" * 50)
