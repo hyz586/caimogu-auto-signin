@@ -976,8 +976,37 @@ def input_comment(page, editor, comment, logger):
         return False
 
 
+def dismiss_popup(page, logger):
+    """关闭 SweetAlert2 等遮罩弹窗，防止遮挡编辑器与提交按钮"""
+    # 优先用 Escape 与按钮关闭
+    try:
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(300)
+    except Exception:
+        pass
+    for sel in (".swal2-close", ".swal2-confirm", ".swal2-cancel"):
+        try:
+            btn = page.query_selector(sel)
+            if btn and btn.is_visible():
+                btn.click(timeout=2000)
+                page.wait_for_timeout(300)
+        except Exception:
+            continue
+    # 兜底：直接移除遮罩层
+    try:
+        removed = page.evaluate(
+            '() => { var c = document.querySelector(".swal2-container"); '
+            'if (c) { c.remove(); return true; } return false; }'
+        )
+        if removed:
+            logger.info("已移除页面弹窗遮罩")
+    except Exception:
+        pass
+
+
 def submit_reply(page, logger):
     """查找并点击提交按钮，返回是否成功"""
+    dismiss_popup(page, logger)
     btn, sel = first_element(page, SELECTORS["submit"])
     if btn:
         try:
@@ -986,7 +1015,14 @@ def submit_reply(page, logger):
             return True
         except Exception as e:
             logger.error("点击提交按钮失败: %s", e)
-            return False
+            # 弹窗残留遮挡时，用 JS 直接派发点击
+            try:
+                page.evaluate("(el) => el.click()", btn)
+                logger.info("JS 兜底点击提交按钮: %s", sel)
+                return True
+            except Exception as e2:
+                logger.error("JS 兜底点击仍失败: %s", e2)
+                return False
 
     # 备选：Ctrl+Enter
     try:
@@ -1009,6 +1045,7 @@ def reply_to_post(page, post_url, config, logger):
         except Exception as e:
             logger.warning("帖子页面加载超时，尝试继续: %s", e)
         page.wait_for_timeout(3000)
+        dismiss_popup(page, logger)
 
         # 提取帖子信息
         title, content = extract_post_info(page)
