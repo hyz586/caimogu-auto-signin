@@ -989,13 +989,26 @@ def input_comment(page, editor, comment, logger):
             '  var container = ed.closest(".ql-container"); '
             '  if(container && window.Quill) { '
             '    var quill = Quill.find(container); '
-            '    if(quill) { quill.setText(text); return true; } '
+            '    if(quill) { '
+            '      quill.setText(text); '
+            '      ed.dispatchEvent(new Event("input", {bubbles: true})); '
+            '      ed.dispatchEvent(new Event("change", {bubbles: true})); '
+            '      return true; '
+            '    } '
             '  } '
             '  return false; '
             '}',
             comment
         )
         if result:
+            page.wait_for_timeout(300)
+            # 模拟键盘输入触发完整DOM事件链，确保提交按钮启用
+            editor.click()
+            page.wait_for_timeout(100)
+            page.keyboard.press("End")
+            page.wait_for_timeout(50)
+            page.keyboard.type(" ", delay=30)
+            page.keyboard.press("Backspace")
             page.wait_for_timeout(500)
             actual = page.evaluate('() => { var ed = document.querySelector(".ql-editor"); return ed ? ed.innerText.trim() : ""; }')
             if actual and len(actual) >= 5:
@@ -1067,11 +1080,34 @@ def dismiss_popup(page, logger):
 def submit_reply(page, logger):
     """查找并点击提交按钮，返回是否成功"""
     dismiss_popup(page, logger)
+    # 检查提交按钮是否被禁用，若禁用则先触发编辑器更新
+    try:
+        disabled = page.evaluate(
+            '() => { var btn = document.querySelector(".btn-reply-root"); '
+            'if(!btn) return false; '
+            'return btn.disabled || btn.classList.contains("disabled") || btn.getAttribute("aria-disabled") === "true"; }'
+        )
+        if disabled:
+            logger.info("提交按钮处于禁用状态，尝试触发编辑器更新")
+            try:
+                page.evaluate(
+                    '() => { var ed = document.querySelector(".ql-editor"); '
+                    'if(ed) { ed.focus(); ed.dispatchEvent(new Event("input", {bubbles: true})); '
+                    'ed.dispatchEvent(new KeyboardEvent("keyup", {bubbles: true, key: "a"})); } }'
+                )
+                page.wait_for_timeout(500)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     btn, sel = first_element(page, SELECTORS["submit"])
     if btn:
         try:
             btn.click()
             logger.info("点击提交按钮: %s", sel)
+            page.wait_for_timeout(500)
+            dismiss_popup(page, logger)
             return True
         except Exception as e:
             logger.error("点击提交按钮失败: %s", e)
@@ -1079,6 +1115,8 @@ def submit_reply(page, logger):
             try:
                 page.evaluate("(el) => el.click()", btn)
                 logger.info("JS 兜底点击提交按钮: %s", sel)
+                page.wait_for_timeout(500)
+                dismiss_popup(page, logger)
                 return True
             except Exception as e2:
                 logger.error("JS 兜底点击仍失败: %s", e2)
@@ -1088,6 +1126,8 @@ def submit_reply(page, logger):
     try:
         page.keyboard.press("Control+Enter")
         logger.info("通过 Ctrl+Enter 提交")
+        page.wait_for_timeout(500)
+        dismiss_popup(page, logger)
         return True
     except Exception:
         logger.error("未找到提交按钮")
@@ -1136,33 +1176,38 @@ def reply_to_post(page, post_url, config, logger):
         if not submit_reply(page, logger):
             return False
 
-        # 等待提交完成
-        page.wait_for_timeout(3000)
+        # 等待提交完成并验证（最多重试3次）
+        for attempt in range(3):
+            page.wait_for_timeout(3000)
+            dismiss_popup(page, logger)
 
-        # 检查错误提示
-        try:
-            error_el = page.query_selector(SELECTORS["error"])
-            if error_el:
-                error_text = error_el.inner_text()
-                if error_text and len(error_text) > 2:
-                    logger.warning("页面提示: %s", error_text)
-        except Exception:
-            pass
+            # 检查错误提示
+            try:
+                error_el = page.query_selector(SELECTORS["error"])
+                if error_el:
+                    error_text = error_el.inner_text()
+                    if error_text and len(error_text) > 2:
+                        logger.warning("页面提示: %s", error_text)
+            except Exception:
+                pass
 
-        # 验证回复是否真正提交：检查编辑器是否已清空
-        try:
-            remaining = page.evaluate(
-                '() => { var ed = document.querySelector(".ql-editor"); '
-                'return ed ? ed.innerText.trim() : ""; }'
-            )
-            if remaining and len(remaining) >= 5:
-                logger.warning("提交后编辑器仍有内容，回复可能未成功提交")
-                return False
-        except Exception:
-            pass
+            # 验证编辑器是否已清空
+            try:
+                remaining = page.evaluate(
+                    '() => { var ed = document.querySelector(".ql-editor"); '
+                    'return ed ? ed.innerText.trim() : ""; }'
+                )
+                if not remaining or len(remaining) < 5:
+                    logger.info("回复提交完成")
+                    return True
+                if attempt < 2:
+                    logger.warning("第%d次检查编辑器仍有内容，重试提交", attempt + 1)
+                    submit_reply(page, logger)
+            except Exception:
+                pass
 
-        logger.info("回复提交完成")
-        return True
+        logger.warning("提交后编辑器仍有内容，回复可能未成功提交")
+        return False
 
     except Exception as e:
         logger.error("回复帖子时出错: %s", e)
