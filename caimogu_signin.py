@@ -965,12 +965,20 @@ def find_editor(page, logger):
 
 def input_comment(page, editor, comment, logger):
     """输入评论到编辑器，依次尝试 fill → Quill API → execCommand → keyboard.type"""
-    editor.click()
-    page.wait_for_timeout(300)
+    # 每次操作前都清除弹窗，并用JS focus编辑器（避免click被弹窗拦截）
+    def focus_editor():
+        dismiss_popup(page, logger)
+        try:
+            page.evaluate('() => { var ed = document.querySelector(".ql-editor"); if(ed) ed.focus(); }')
+            page.wait_for_timeout(200)
+        except Exception:
+            pass
+
+    focus_editor()
 
     # 方式一：fill
     try:
-        editor.fill(comment)
+        editor.fill(comment, timeout=5000)
         page.wait_for_timeout(500)
         actual = page.evaluate('() => { var ed = document.querySelector(".ql-editor"); return ed ? ed.innerText.trim() : ""; }')
         if actual and len(actual) >= 5:
@@ -981,6 +989,7 @@ def input_comment(page, editor, comment, logger):
         pass
 
     # 方式二：通过 Quill API 设置内容（确保内部状态更新）
+    focus_editor()
     try:
         result = page.evaluate(
             '(text) => {'
@@ -1003,8 +1012,7 @@ def input_comment(page, editor, comment, logger):
         if result:
             page.wait_for_timeout(300)
             # 模拟键盘输入触发完整DOM事件链，确保提交按钮启用
-            editor.click()
-            page.wait_for_timeout(100)
+            focus_editor()
             page.keyboard.press("End")
             page.wait_for_timeout(50)
             page.keyboard.type(" ", delay=30)
@@ -1018,9 +1026,8 @@ def input_comment(page, editor, comment, logger):
         pass
 
     # 方式三：execCommand 选中并插入文本
+    focus_editor()
     try:
-        editor.click()
-        page.wait_for_timeout(200)
         page.evaluate('() => { var ed = document.querySelector(".ql-editor"); if(ed) { ed.focus(); var range = document.createRange(); range.selectNodeContents(ed); var sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range); } }')
         page.wait_for_timeout(100)
         page.evaluate('(text) => { document.execCommand("insertText", false, text); }', comment)
@@ -1033,9 +1040,8 @@ def input_comment(page, editor, comment, logger):
         pass
 
     # 方式四：键盘逐字输入
+    focus_editor()
     try:
-        editor.click()
-        page.wait_for_timeout(200)
         page.keyboard.type(comment, delay=50)
         page.wait_for_timeout(500)
         actual = page.evaluate('() => { var ed = document.querySelector(".ql-editor"); return ed ? ed.innerText.trim() : ""; }')
