@@ -964,7 +964,7 @@ def find_editor(page, logger):
 
 
 def input_comment(page, editor, comment, logger):
-    """输入评论到编辑器，依次尝试 fill → evaluate → keyboard.type"""
+    """输入评论到编辑器，依次尝试 fill → Quill API → execCommand → keyboard.type"""
     editor.click()
     page.wait_for_timeout(300)
 
@@ -972,33 +972,65 @@ def input_comment(page, editor, comment, logger):
     try:
         editor.fill(comment)
         page.wait_for_timeout(500)
-        logger.info("评论已输入编辑器(fill)")
-        return True
+        actual = page.evaluate('() => { var ed = document.querySelector(".ql-editor"); return ed ? ed.innerText.trim() : ""; }')
+        if actual and len(actual) >= 5:
+            logger.info("评论已输入编辑器(fill)")
+            return True
+        raise Exception("fill后内容为空")
     except Exception:
         pass
 
-    # 方式二：直接设置 Quill 编辑器内容
+    # 方式二：通过 Quill API 设置内容（确保内部状态更新）
     try:
-        page.evaluate(
-            '(text) => { var ed = document.querySelector(".ql-editor"); '
-            'if(ed) { ed.innerHTML = "<p>" + text + "</p>"; '
-            'ed.dispatchEvent(new Event("input", {bubbles: true})); } }',
+        result = page.evaluate(
+            '(text) => {'
+            '  var ed = document.querySelector(".ql-editor"); '
+            '  if(!ed) return false; '
+            '  var container = ed.closest(".ql-container"); '
+            '  if(container && window.Quill) { '
+            '    var quill = Quill.find(container); '
+            '    if(quill) { quill.setText(text); return true; } '
+            '  } '
+            '  return false; '
+            '}',
             comment
         )
-        page.wait_for_timeout(500)
-        logger.info("评论已输入编辑器(evaluate)")
-        return True
+        if result:
+            page.wait_for_timeout(500)
+            actual = page.evaluate('() => { var ed = document.querySelector(".ql-editor"); return ed ? ed.innerText.trim() : ""; }')
+            if actual and len(actual) >= 5:
+                logger.info("评论已输入编辑器(Quill API)")
+                return True
     except Exception:
         pass
 
-    # 方式三：键盘逐字输入
+    # 方式三：execCommand 选中并插入文本
+    try:
+        editor.click()
+        page.wait_for_timeout(200)
+        page.evaluate('() => { var ed = document.querySelector(".ql-editor"); if(ed) { ed.focus(); var range = document.createRange(); range.selectNodeContents(ed); var sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range); } }')
+        page.wait_for_timeout(100)
+        page.evaluate('(text) => { document.execCommand("insertText", false, text); }', comment)
+        page.wait_for_timeout(500)
+        actual = page.evaluate('() => { var ed = document.querySelector(".ql-editor"); return ed ? ed.innerText.trim() : ""; }')
+        if actual and len(actual) >= 5:
+            logger.info("评论已输入编辑器(execCommand)")
+            return True
+    except Exception:
+        pass
+
+    # 方式四：键盘逐字输入
     try:
         editor.click()
         page.wait_for_timeout(200)
         page.keyboard.type(comment, delay=50)
         page.wait_for_timeout(500)
-        logger.info("评论已输入编辑器(keyboard)")
-        return True
+        actual = page.evaluate('() => { var ed = document.querySelector(".ql-editor"); return ed ? ed.innerText.trim() : ""; }')
+        if actual and len(actual) >= 5:
+            logger.info("评论已输入编辑器(keyboard)")
+            return True
+        logger.error("键盘输入后内容仍为空")
+        return False
     except Exception as e:
         logger.error("输入评论失败: %s", e)
         return False
@@ -1114,6 +1146,18 @@ def reply_to_post(page, post_url, config, logger):
                 error_text = error_el.inner_text()
                 if error_text and len(error_text) > 2:
                     logger.warning("页面提示: %s", error_text)
+        except Exception:
+            pass
+
+        # 验证回复是否真正提交：检查编辑器是否已清空
+        try:
+            remaining = page.evaluate(
+                '() => { var ed = document.querySelector(".ql-editor"); '
+                'return ed ? ed.innerText.trim() : ""; }'
+            )
+            if remaining and len(remaining) >= 5:
+                logger.warning("提交后编辑器仍有内容，回复可能未成功提交")
+                return False
         except Exception:
             pass
 
