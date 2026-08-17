@@ -1329,6 +1329,9 @@ def check_login_status(page, logger):
                     if exp_time < datetime.now():
                         logger.error("登录令牌(cmg_token)已于 %s 过期", exp_time.strftime('%Y-%m-%d %H:%M'))
                         return False
+                    days_left = (exp_time - datetime.now()).days
+                    if days_left <= 2:
+                        logger.warning("登录令牌将在 %d 天后过期，请尽快重新登录", days_left)
                     logger.info("登录令牌有效期至: %s", exp_time.strftime('%Y-%m-%d %H:%M'))
                 break
     except Exception as e:
@@ -1457,6 +1460,12 @@ def run_signin():
         except Exception as e:
             logger.error("签到过程出错: %s", e)
         finally:
+            # 保存浏览器状态（可能包含服务器刷新的 cookie，延长登录有效期）
+            try:
+                context.storage_state(path=str(PATHS["auth"]))
+                logger.info("已更新登录状态文件")
+            except Exception as e:
+                logger.warning("保存登录状态失败: %s", e)
             context.close()
             browser.close()
 
