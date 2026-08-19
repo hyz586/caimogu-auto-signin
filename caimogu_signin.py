@@ -572,86 +572,7 @@ def detect_title_type(title):
     return "normal"
 
 
-# 常见游戏/作品名词库：优先匹配，避免硬截前4字产生无意义关键词
-_DEFAULT_KNOWN_GAME_NAMES = [
-    "黑神话悟空", "黑神话", "原神", "崩坏星穹铁道", "星穹铁道", "崩坏",
-    "艾尔登法环", "老头环", "刺客信条", "GTA", "侠盗猎车手",
-    "塞尔达", "王国之泪", "旷野之息", "最终幻想", "勇者斗恶龙",
-    "怪物猎人", "怪猎", "荒野大镖客", "使命召唤", "战神",
-    "对马岛之魂", "赛博朋克", "巫师", "霍格沃茨", "帕鲁",
-    "幻兽帕鲁", "绝区零", "鸣潮", "明日方舟", "王者荣耀",
-    "和平精英", "永劫无间", "双人成行", "糖豆人", "光遇",
-    "崩坏三", "崩坏3", "蔚蓝档案", "妮姬",
-    "胜利女神", "无主之地", "生化危机", "寂静岭", "龙之信条",
-    "死亡搁浅", "往日不再", "地平线", "极限竞速",
-    "刀锋战士", "超人", "蝙蝠侠", "蜘蛛侠", "复仇者联盟",
-    "明日之子", "沙丘", "三体",
-]
-
-_KNOWN_GAME_NAMES = _DEFAULT_KNOWN_GAME_NAMES
 _DETAIL_PATTERNS = _DEFAULT_DETAIL_PATTERNS
-
-
-def extract_keyword(title):
-    """从帖子标题中提取关键词，优先匹配游戏名/专有名词"""
-    title = re.sub(r'^【.*?】\s*', '', title)
-    title = re.sub(r'^\[.*?\]\s*', '', title)
-
-    # 优先级1：书名号《》内的内容（通常是游戏名或作品名）
-    match = re.search(r'《(.+?)》', title)
-    if match and len(match.group(1)) >= 2:
-        return match.group(1)[:6]
-
-    # 优先级1.5：引号内的内容
-    match = re.search(r'[\u201c\u201d"\u300c\u300d\u300e\u300f](.+?)[\u201c\u201d"\u300c\u300d\u300e\u300f]', title)
-    if match and len(match.group(1)) >= 2:
-        return match.group(1)[:6]
-
-    # 优先级2：已知游戏/作品名词库
-    for name in _KNOWN_GAME_NAMES:
-        if name in title:
-            return name
-
-    # 优先级3：已知的复合关键词模式
-    keyword_patterns = [
-        r'单机游戏', r'登录闪退', r'闪退问题', r'游戏画面', r'刷图效果',
-        r'版本更新', r'更新内容', r'抽卡出货', r'真人电影', r'档期原因',
-        r'主创澄清', r'合约已签', r'突然砍剧', r'推荐.*游戏',
-    ]
-    for pattern in keyword_patterns:
-        match = re.search(pattern, title)
-        if match:
-            found = match.group(0).replace('推荐几款', '').replace('推荐', '')
-            if 2 <= len(found) <= 6:
-                return found
-
-    # 优先级4：清理后提取，但不再硬截前4字，而是取较长的中文连续片段
-    clean = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9]', '', title)
-
-    for prefix in _MEANINGLESS_PREFIXES:
-        if clean.startswith(prefix) and len(clean) > len(prefix) + 2:
-            clean = clean[len(prefix):]
-            break
-
-    for suffix in _MEANINGLESS_SUFFIXES:
-        if clean.endswith(suffix) and len(clean) > len(suffix) + 2:
-            clean = clean[:-len(suffix)]
-            break
-
-    # 从清理后的文本中提取2-6字的中文片段，取最长的
-    segments = re.findall(r'[\u4e00-\u9fa5]{2,6}', clean)
-    if segments:
-        # 从最长候选开始，真正过滤掉包含无意义片段的关键词
-        for best in sorted(segments, key=len, reverse=True):
-            if any(bad in best for bad in _BAD_PARTS):
-                continue
-            if 2 <= len(best) <= 6:
-                return best
-
-    # 兜底：如果以上都没匹配到，取前2-4字
-    if len(clean) >= 2:
-        return clean[:min(4, len(clean))]
-    return ""
 
 
 def _strip_html_and_noise(text):
@@ -689,8 +610,7 @@ def _is_generic_or_empty(title, content):
         return True
 
     if not content and not any(re.search(p, compact_title) for p in _DETAIL_PATTERNS):
-        keyword = extract_keyword(title)
-        if not keyword or len(keyword) < 2:
+        if len(re.findall(r'[\u4e00-\u9fa5]', compact_title)) < 2:
             return True
 
     return False
@@ -784,8 +704,8 @@ def _extract_detail(title, content):
         if not any(stop in chunk for stop in _DETAIL_STOP_WORDS):
             return chunk[:8]
 
-    keyword = extract_keyword(title)
-    return keyword[:8] if keyword else ""
+    segments = re.findall(r'[\u4e00-\u9fa5]{2,6}', title)
+    return segments[0][:8] if segments else ""
 
 
 def _normalize_generated_comment(text):
@@ -838,14 +758,13 @@ def generate_comment_template(title, content=""):
     if not detail:
         return "SKIP"
 
-    keyword = extract_keyword(title) or ""
     title_type = detect_title_type((title or "") + " " + (content or "")[:120])
     templates = _REPLY_TEMPLATES.get(title_type, _REPLY_TEMPLATES["normal"])
 
     # 打乱模板顺序，填充插槽并应用同义词随机化
     candidates = []
     for tpl in random.sample(templates, len(templates)):
-        filled = tpl.replace("{d}", detail).replace("{kw}", keyword)
+        filled = tpl.replace("{d}", detail)
         filled = _apply_synonyms(filled)
         candidates.append(filled)
 
@@ -1005,41 +924,61 @@ POST_STATUS = (
     "AUTH_EXPIRED", # 登录失效
 )
 
-# 质量评分权重
+# 质量评分权重（V3.2.2 语义结构评分）
 _SCORE_WEIGHTS = {
-    "keyword": 20,    # 提及标题核心对象
-    "detail": 25,     # 引用正文具体细节
-    "type_match": 20, # 与帖子类型匹配
-    "no_cliche": 15,  # 没有套话
-    "length": 10,     # 长度合适
-    "low_repeat": 10, # 与历史评论重复度低
+    "relevance": 30,    # 相关性：评论是否回应了帖子主题
+    "specificity": 25,  # 具体性：是否引用了帖子中的具体细节
+    "type_match": 20,   # 类型匹配：与帖子类型是否吻合
+    "naturalness": 15,  # 自然度：不含套话、不像模板
+    "length_repeat": 10, # 长度合适且与历史重复度低
 }
 
 
 def score_comment_quality(comment, title, content):
-    """评估评论质量，返回 0-100 分及各维度得分明细"""
+    """评估评论质量（V3.2.2 语义结构评分），返回 0-100 分及各维度得分明细
+
+    评分维度：
+    - relevance (30): 评论与帖子主题的字符 n-gram 重叠度
+    - specificity (25): 是否引用了帖子中的具体细节
+    - type_match (20): 与帖子类型是否吻合
+    - naturalness (15): 不含套话、不像模板
+    - length_repeat (10): 长度合适且与历史重复度低（默认满分，相似则扣分）
+    """
     scores = {}
     comment_clean = _normalize_generated_comment(comment)
     if not comment_clean or comment_clean.upper() == "SKIP":
         return 0, {}
 
-    # 1. 提及标题核心对象（+20）
-    keyword = extract_keyword(title or "") or ""
-    if keyword and keyword in comment_clean:
-        scores["keyword"] = _SCORE_WEIGHTS["keyword"]
-    elif keyword and len(keyword) >= 2:
-        # 部分匹配（关键词的前2字出现在评论中）
-        if keyword[:2] in comment_clean:
-            scores["keyword"] = _SCORE_WEIGHTS["keyword"] // 2
+    # 1. 相关性（30）：评论与帖子主题的字符 2-gram 重叠度
+    title_chars = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9]', '', title or "")
+    content_chars = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9]', '', content or "")[:200]
+    post_text = title_chars + content_chars
+    comment_chars = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9]', '', comment_clean)
+    if len(comment_chars) >= 2 and len(post_text) >= 2:
+        comment_grams = set(comment_chars[i:i+2] for i in range(len(comment_chars) - 1))
+        post_grams = set(post_text[i:i+2] for i in range(len(post_text) - 1))
+        if comment_grams and post_grams:
+            overlap = len(comment_grams & post_grams) / len(comment_grams)
+            if overlap >= 0.3:
+                scores["relevance"] = _SCORE_WEIGHTS["relevance"]
+            elif overlap >= 0.15:
+                scores["relevance"] = _SCORE_WEIGHTS["relevance"] * 2 // 3
+            elif overlap >= 0.05:
+                scores["relevance"] = _SCORE_WEIGHTS["relevance"] // 3
 
-    # 2. 引用正文具体细节（+25）
+    # 2. 具体性（25）：是否引用了帖子中的具体细节
     detail = _extract_detail(title, content) or ""
     if detail and detail in comment_clean:
-        scores["detail"] = _SCORE_WEIGHTS["detail"]
+        scores["specificity"] = _SCORE_WEIGHTS["specificity"]
     elif detail and len(detail) >= 2 and detail[:2] in comment_clean:
-        scores["detail"] = _SCORE_WEIGHTS["detail"] // 2
+        scores["specificity"] = _SCORE_WEIGHTS["specificity"] // 2
+    else:
+        # 检查评论是否包含正文中的任何 3+ 字片段
+        content_segments = set(re.findall(r'[\u4e00-\u9fa5]{3,6}', content or ""))
+        if any(seg in comment_clean for seg in content_segments):
+            scores["specificity"] = _SCORE_WEIGHTS["specificity"]
 
-    # 3. 与帖子类型匹配（+20）
+    # 3. 类型匹配（20）：与帖子类型是否吻合
     title_type = detect_title_type((title or "") + " " + (content or "")[:120])
     type_keywords = {
         "regret": ["可惜", "难受", "期待", "失望", "白费"],
@@ -1055,21 +994,19 @@ def score_comment_quality(comment, title, content):
     if any(w in comment_clean for w in type_words):
         scores["type_match"] = _SCORE_WEIGHTS["type_match"]
 
-    # 4. 没有套话（+15）
+    # 4. 自然度（15）：不含套话、不像模板
     if not any(part in comment_clean for part in _HARD_BANNED_PARTS):
-        scores["no_cliche"] = _SCORE_WEIGHTS["no_cliche"]
+        if not any(comment_clean.startswith(prefix) for prefix in _WEAK_BANNED_PREFIXES):
+            scores["naturalness"] = _SCORE_WEIGHTS["naturalness"]
+        else:
+            scores["naturalness"] = _SCORE_WEIGHTS["naturalness"] // 2
 
-    # 5. 长度合适（+10）：15-40字为合适
+    # 5. 长度合适 + 重复度低（10）：默认满分，相似则扣分
     clen = _comment_len(comment_clean)
     if 15 <= clen <= 40:
-        scores["length"] = _SCORE_WEIGHTS["length"]
+        scores["length_repeat"] = _SCORE_WEIGHTS["length_repeat"]
     elif 10 <= clen <= 50:
-        scores["length"] = _SCORE_WEIGHTS["length"] // 2
-
-    # 6. 与历史评论重复度低（+10）：由调用方传入 recent_comments 后计算
-    # 此项在 is_comment_too_similar 检查后由调用方补充
-    # 默认给满分，如果检测到相似则扣分
-    scores["low_repeat"] = _SCORE_WEIGHTS["low_repeat"]
+        scores["length_repeat"] = _SCORE_WEIGHTS["length_repeat"] // 2
 
     total = sum(scores.values())
     return total, scores
@@ -1634,8 +1571,13 @@ def wait_reply_result(page, logger, previous_editor_text, initial_comments=None,
         current = get_reply_editor_text(page)
         if not current and previous_editor_text:
             logger.info("回复编辑器已清空，继续等待最终提交状态")
-            # 评论数未增加时，尝试在页面中查找已提交的评论文本
+            # 二级验证：在评论区域中查找已提交的评论文本
             if len(previous_editor_text) >= 5:
+                verify_result = verify_existing_comment(page, previous_editor_text, logger)
+                if verify_result is True:
+                    logger.info("在评论区域找到已提交的评论文本，确认提交成功")
+                    return True
+                # fallback：评论选择器没找到，但全页面可能包含
                 try:
                     text_found = page.evaluate(
                         '(expected) => document.body.innerText.includes(expected)',
@@ -1646,6 +1588,27 @@ def wait_reply_result(page, logger, previous_editor_text, initial_comments=None,
                         return True
                 except Exception:
                     pass
+
+    # 三级验证：刷新页面后检查评论文本是否出现
+    if previous_editor_text and len(previous_editor_text) >= 5:
+        logger.info("10秒内未能确认提交状态，尝试刷新页面后验证")
+        try:
+            page.reload(wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(3000)
+            verify_result = verify_existing_comment(page, previous_editor_text, logger)
+            if verify_result is True:
+                logger.info("刷新后在评论区域找到评论文本，确认提交成功")
+                return True
+            # fallback：全页面搜索
+            text_found = page.evaluate(
+                '(expected) => document.body.innerText.includes(expected)',
+                previous_editor_text
+            )
+            if text_found:
+                logger.info("刷新后在页面中找到评论文本，确认提交成功")
+                return True
+        except Exception as e:
+            logger.warning("刷新页面验证失败: %s", e)
 
     logger.warning("提交结果无法明确确认，标记为未知状态")
     return None
@@ -1809,7 +1772,7 @@ def reply_to_post(page, post_url, config, logger, post_id=None):
             if is_sim:
                 logger.warning("[POST %s] 评论与历史相似度 %.0f%%，扣减重复分: %s",
                                pid, max_sim * 100, sim_comment[:30])
-                quality_detail.pop("low_repeat", None)
+                quality_detail.pop("length_repeat", None)
                 quality_score = sum(quality_detail.values())
 
         logger.info("[POST %s] 质量评分: %d/100 (%s)", pid, quality_score, quality_detail)
@@ -2328,7 +2291,6 @@ def show_test_comments():
     ]
 
     for i, (title, content) in enumerate(test_posts):
-        keyword = extract_keyword(title)
         decision = judge_replyability(title, content)
         logger.info("-" * 40)
         logger.info("标题: %s", title)
@@ -2336,7 +2298,6 @@ def show_test_comments():
         comment = generate_comment(title, content, config)
         char_count = _comment_len(comment)
         logger.info("判断: %s", decision)
-        logger.info("关键词: %s", keyword)
         if comment == "SKIP":
             logger.info("结果: SKIP")
         else:
