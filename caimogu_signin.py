@@ -40,7 +40,6 @@ PATHS = {
     "auth":    SCRIPT_DIR / "auth_state.json",
     "replied": SCRIPT_DIR / "replied_posts.json",
     "log":     SCRIPT_DIR / "signin_log.txt",
-    "keywords": SCRIPT_DIR / "keywords.json",
     "lock":    SCRIPT_DIR / "signin.lock",
 }
 
@@ -174,20 +173,6 @@ _DEFAULT_DETAIL_PATTERNS = [
     r'报错', r'卡住', r'掉帧', r'联机', r'存档', r'补丁'
 ]
 
-
-def _load_keywords():
-    """从 keywords.json 加载关键词库，不存在时使用默认值"""
-    defaults = {
-        "known_game_names": _DEFAULT_KNOWN_GAME_NAMES,
-        "detail_patterns": _DEFAULT_DETAIL_PATTERNS,
-    }
-    if PATHS["keywords"].exists():
-        data = load_json(PATHS["keywords"], {})
-        if isinstance(data.get("known_game_names"), list):
-            defaults["known_game_names"] = data["known_game_names"]
-        if isinstance(data.get("detail_patterns"), list):
-            defaults["detail_patterns"] = data["detail_patterns"]
-    return defaults
 
 _REPLY_TEMPLATES = {
     "help": [
@@ -603,9 +588,8 @@ _DEFAULT_KNOWN_GAME_NAMES = [
     "明日之子", "沙丘", "三体",
 ]
 
-_keywords_data = _load_keywords()
-_KNOWN_GAME_NAMES = _keywords_data["known_game_names"]
-_DETAIL_PATTERNS = _keywords_data["detail_patterns"]
+_KNOWN_GAME_NAMES = _DEFAULT_KNOWN_GAME_NAMES
+_DETAIL_PATTERNS = _DEFAULT_DETAIL_PATTERNS
 
 
 def extract_keyword(title):
@@ -1646,11 +1630,22 @@ def wait_reply_result(page, logger, previous_editor_text, initial_comments=None,
             if any(word in err for word in error_words):
                 return False
 
-        # 4. 编辑器清空只能作为"可能成功"的辅助信号，
-        # 不能单独判定成功；继续等待页面状态变化。
+        # 4. 编辑器清空后，继续等待；同时尝试文本匹配确认成功
         current = get_reply_editor_text(page)
         if not current and previous_editor_text:
             logger.info("回复编辑器已清空，继续等待最终提交状态")
+            # 评论数未增加时，尝试在页面中查找已提交的评论文本
+            if len(previous_editor_text) >= 5:
+                try:
+                    text_found = page.evaluate(
+                        '(expected) => document.body.innerText.includes(expected)',
+                        previous_editor_text
+                    )
+                    if text_found:
+                        logger.info("在页面中找到已提交的评论文本，确认提交成功")
+                        return True
+                except Exception:
+                    pass
 
     logger.warning("提交结果无法明确确认，标记为未知状态")
     return None
@@ -1888,12 +1883,12 @@ def reply_to_post(page, post_url, config, logger, post_id=None):
             logger.info("[POST %s] SUCCESS", pid)
             # 成功提示出现后再关闭可关闭的提示，不删除未知弹窗。
             close_safe_popup(page, logger)
-            meta["verification"] = "comment_count"
+            meta["verification"] = "verified"
             record_post_execution(pid, title, "SUCCESS", comment=comment,
                                    comment_source=comment_source,
                                    quality_score=quality_score,
                                    duration_ms=meta["duration_ms"],
-                                   verification="comment_count")
+                                   verification="verified")
             return ("SUCCESS", comment, meta)
 
         if result is None:
