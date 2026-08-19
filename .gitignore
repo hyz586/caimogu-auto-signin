@@ -4,6 +4,9 @@ replied_posts.json
 signin_log.txt
 run_log.txt
 last_command_output.txt
+signin.lock
+keywords.json
+daily_report.json
 
 # API Key 配置（每个人不同，不提交）
 # config.json 取消注释即可忽略

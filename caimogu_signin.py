@@ -21,6 +21,11 @@ import logging
 from datetime import datetime, date, timedelta
 from pathlib import Path
 
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
+
 # ============================================================
 #  1. 路径与常量
 # ============================================================
@@ -35,6 +40,8 @@ PATHS = {
     "auth":    SCRIPT_DIR / "auth_state.json",
     "replied": SCRIPT_DIR / "replied_posts.json",
     "log":     SCRIPT_DIR / "signin_log.txt",
+    "keywords": SCRIPT_DIR / "keywords.json",
+    "lock":    SCRIPT_DIR / "signin.lock",
 }
 
 # 免安装版优先使用程序目录旁边的 Playwright 浏览器
@@ -42,11 +49,24 @@ _browsers_dir = SCRIPT_DIR / "playwright-browsers"
 if _browsers_dir.exists():
     os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(_browsers_dir))
 
-USER_AGENT = (
+USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/120.0.0.0 Safari/537.36"
-)
+    "Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/130.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/129.0.0.0 Safari/537.36",
+]
+
+VIEWPORT_SIZES = [
+    {"width": 1280, "height": 720},
+    {"width": 1366, "height": 768},
+    {"width": 1440, "height": 800},
+    {"width": 1536, "height": 864},
+]
 
 DEFAULT_CONFIG = {
     "circle_url": "https://www.caimogu.cc/circle/492.html",
@@ -142,7 +162,7 @@ _DETAIL_STOP_WORDS = [
     "分享", "看看", "求助", "推荐", "问题"
 ]
 
-_DETAIL_PATTERNS = [
+_DEFAULT_DETAIL_PATTERNS = [
     r'多次.{0,3}换导演', r'换导演', r'剧本调整',
     r'特效.{0,8}看不清怪', r'特效.{0,8}看不清',
     r'节奏慢', r'开放世界', r'草元素', r'新地图',
@@ -153,6 +173,21 @@ _DETAIL_PATTERNS = [
     r'真人.{0,3}电影', r'单机.{0,3}游戏', r'取消', r'延期',
     r'报错', r'卡住', r'掉帧', r'联机', r'存档', r'补丁'
 ]
+
+
+def _load_keywords():
+    """从 keywords.json 加载关键词库，不存在时使用默认值"""
+    defaults = {
+        "known_game_names": _DEFAULT_KNOWN_GAME_NAMES,
+        "detail_patterns": _DEFAULT_DETAIL_PATTERNS,
+    }
+    if PATHS["keywords"].exists():
+        data = load_json(PATHS["keywords"], {})
+        if isinstance(data.get("known_game_names"), list):
+            defaults["known_game_names"] = data["known_game_names"]
+        if isinstance(data.get("detail_patterns"), list):
+            defaults["detail_patterns"] = data["detail_patterns"]
+    return defaults
 
 _REPLY_TEMPLATES = {
     "help": [
@@ -277,50 +312,74 @@ def load_json(path, default):
 
 
 def save_json(path, data):
-    """写入 JSON 文件"""
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    """原子写入 JSON 文件，避免程序中断导致 JSON 损坏"""
+    tmp_path = path.with_name(path.name + ".tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        tmp_path.replace(path)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+
+
+class SingleInstanceLock:
+    """Windows 单实例锁，防止多个签到进程同时运行"""
+
+    def __init__(self, lock_path):
+        self.lock_path = str(lock_path)
+        self._fh = None
+
+    def acquire(self):
+        if msvcrt is None:
+            return True
+        try:
+            self._fh = open(self.lock_path, "w")
+            msvcrt.locking(self._fh.fileno(), msvcrt.LK_NBLCK, 1)
+            return True
+        except (OSError, IOError):
+            if self._fh:
+                self._fh.close()
+                self._fh = None
+            return False
+
+    def release(self):
+        if msvcrt is None or self._fh is None:
+            return
+        try:
+            self._fh.seek(0)
+            msvcrt.locking(self._fh.fileno(), msvcrt.LK_UNLCK, 1)
+            self._fh.close()
+        except Exception:
+            pass
+        finally:
+            self._fh = None
+            try:
+                os.unlink(self.lock_path)
+            except Exception:
+                pass
+
 
 # ============================================================
 #  4. 日志
 # ============================================================
 
-def clean_old_logs(max_days=7):
-    """清理超过指定天数的旧日志，仅保留最近 max_days 天的记录"""
-    log_path = PATHS["log"]
-    if not log_path.exists():
-        return
-    try:
-        cutoff = datetime.now() - timedelta(days=max_days)
-        with open(log_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-        kept = []
-        keep_current_block = False
-        for line in lines:
-            try:
-                ts = datetime.strptime(line[:19], "%Y-%m-%d %H:%M:%S")
-                keep_current_block = ts >= cutoff
-            except ValueError:
-                pass
-            if keep_current_block:
-                kept.append(line)
-        if len(kept) == len(lines):
-            return
-        with open(log_path, "w", encoding="utf-8") as f:
-            f.writelines(kept)
-    except Exception:
-        pass
-
-
 def setup_logging():
-    """配置日志（同时输出到文件和控制台）"""
-    clean_old_logs(max_days=7)
+    """配置日志（同时输出到文件和控制台），按天轮转保留7天"""
+    from logging.handlers import TimedRotatingFileHandler
     logger = logging.getLogger("caimogu")
     logger.setLevel(logging.INFO)
     if logger.handlers:
         return logger
     fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-    fh = logging.FileHandler(str(PATHS["log"]), encoding="utf-8")
+    fh = TimedRotatingFileHandler(
+        str(PATHS["log"]), when='midnight', backupCount=7, encoding='utf-8'
+    )
     fh.setLevel(logging.INFO)
     fh.setFormatter(fmt)
     logger.addHandler(fh)
@@ -334,6 +393,38 @@ def setup_logging():
 #  5. 配置与执行记录
 # ============================================================
 
+def validate_config(config):
+    """校验配置参数合法性，返回修正后的 config"""
+    try:
+        rc = int(config.get("reply_count", 3))
+        config["reply_count"] = max(1, min(rc, 20))
+    except (TypeError, ValueError):
+        config["reply_count"] = 3
+
+    try:
+        mind = int(config.get("min_delay", 8))
+        maxd = int(config.get("max_delay", 20))
+        if mind < 1: mind = 1
+        if maxd < mind: maxd = mind
+        config["min_delay"] = mind
+        config["max_delay"] = maxd
+    except (TypeError, ValueError):
+        config["min_delay"] = 8
+        config["max_delay"] = 20
+
+    try:
+        pt = int(config.get("page_timeout_ms", 90000))
+        config["page_timeout_ms"] = max(10000, pt)
+    except (TypeError, ValueError):
+        config["page_timeout_ms"] = 90000
+
+    url = config.get("circle_url", "")
+    if not url or not url.startswith("http"):
+        config["circle_url"] = DEFAULT_CONFIG["circle_url"]
+
+    return config
+
+
 def load_config():
     """加载配置，不存在则自动创建默认配置"""
     config = DEFAULT_CONFIG.copy()
@@ -341,16 +432,12 @@ def load_config():
         save_json(PATHS["config"], config)
         return config
     config.update(load_json(PATHS["config"], {}))
-    return config
+    return validate_config(config)
 
 
 def get_today_reply_count():
-    """获取今天已成功回复的数量"""
-    data = load_json(PATHS["replied"], {})
-    today = date.today().isoformat()
-    if data.get("last_run_date") == today:
-        return int(data.get("last_run_posts", 0) or 0)
-    return 0
+    """获取今天已成功回复的数量（基于已确认 SUCCESS 的帖子 ID）"""
+    return len(get_today_replied_ids())
 
 
 def get_today_replied_ids():
@@ -362,8 +449,57 @@ def get_today_replied_ids():
     return []
 
 
-def mark_today_progress(post_count, reply_count, post_id=None):
-    """记录进度，避免中断后重复回复；同时保存帖子ID"""
+def get_replied_history():
+    """获取最近30天内已回复过的帖子ID集合，防止跨天重复回复"""
+    data = load_json(PATHS["replied"], {})
+    history = data.get("replied_history", {})
+    cutoff = (date.today() - timedelta(days=30)).isoformat()
+    return {pid for pid, dt in history.items() if dt >= cutoff}
+
+
+def normalize_post_id(url):
+    """从帖子 URL 中提取稳定数字 ID，提取失败时返回去斜杠 URL"""
+    m = re.search(r'/(\d+)\.html', url)
+    if m:
+        return m.group(1)
+    return url.rstrip('/').split('/')[-1]
+
+
+def get_unknown_posts():
+    """获取3天内状态未知的帖子（超过3天的标记为 EXPIRED 并清理）
+
+    UNKNOWN 生命周期：
+    - 0-3天：可验证（由调用方在遍历帖子时自动检查）
+    - 超过3天：EXPIRED，自动清理避免长期悬挂
+    """
+    data = load_json(PATHS["replied"], {})
+    unknown = data.get("unknown_posts", {})
+    cutoff = (date.today() - timedelta(days=3)).isoformat()
+
+    active = {}
+    expired = []
+    for pid, info in unknown.items():
+        post_date = info.get("date", "")
+        if post_date >= cutoff:
+            active[pid] = info
+        else:
+            expired.append(pid)
+
+    if expired:
+        for pid in expired:
+            unknown.pop(pid, None)
+        data["unknown_posts"] = unknown
+        save_json(PATHS["replied"], data)
+
+    return active
+
+
+def mark_today_progress(post_count, reply_count, post_id=None, result=None, comment=None):
+    """记录进度，避免中断后重复回复；同时保存帖子ID和历史记录
+
+    result: True=成功(记入history并清理UNKNOWN), None=未知状态(记入unknown_posts)
+    comment: 评论内容（仅UNKNOWN状态时记录）
+    """
     data = load_json(PATHS["replied"], {})
     today = date.today().isoformat()
     data["last_run_date"] = today
@@ -371,12 +507,36 @@ def mark_today_progress(post_count, reply_count, post_id=None):
     data["last_run_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     data["status"] = "running" if post_count < reply_count else "done"
 
-    # 保存当天已回复的帖子ID列表
     if post_id:
-        ids = data.get("today_post_ids", [])
-        if post_id not in ids:
-            ids.append(post_id)
-        data["today_post_ids"] = ids
+        # 处理成功状态
+        if result is True:
+            ids = data.get("today_post_ids", [])
+            if post_id not in ids:
+                ids.append(post_id)
+            data["today_post_ids"] = ids
+
+            # 更新历史记录
+            history = data.get("replied_history", {})
+            history[post_id] = today
+            # 清理超过30天的旧记录
+            cutoff = (date.today() - timedelta(days=30)).isoformat()
+            history = {pid: dt for pid, dt in history.items() if dt >= cutoff}
+            data["replied_history"] = history
+
+            # 成功后清理该帖的 UNKNOWN 记录
+            unknown = data.get("unknown_posts", {})
+            unknown.pop(post_id, None)
+            data["unknown_posts"] = unknown
+
+        # 处理未知状态：记录待人工复核
+        elif result is None and comment:
+            unknown = data.get("unknown_posts", {})
+            unknown[post_id] = {
+                "date": today,
+                "comment": comment,
+                "status": "pending_review"
+            }
+            data["unknown_posts"] = unknown
 
     save_json(PATHS["replied"], data)
 
@@ -428,7 +588,7 @@ def detect_title_type(title):
 
 
 # 常见游戏/作品名词库：优先匹配，避免硬截前4字产生无意义关键词
-_KNOWN_GAME_NAMES = [
+_DEFAULT_KNOWN_GAME_NAMES = [
     "黑神话悟空", "黑神话", "原神", "崩坏星穹铁道", "星穹铁道", "崩坏",
     "艾尔登法环", "老头环", "刺客信条", "GTA", "侠盗猎车手",
     "塞尔达", "王国之泪", "旷野之息", "最终幻想", "勇者斗恶龙",
@@ -436,12 +596,16 @@ _KNOWN_GAME_NAMES = [
     "对马岛之魂", "赛博朋克", "巫师", "霍格沃茨", "帕鲁",
     "幻兽帕鲁", "绝区零", "鸣潮", "明日方舟", "王者荣耀",
     "和平精英", "永劫无间", "双人成行", "糖豆人", "光遇",
-    "原神", "崩坏三", "崩坏3", "蔚蓝档案", "妮姬",
+    "崩坏三", "崩坏3", "蔚蓝档案", "妮姬",
     "胜利女神", "无主之地", "生化危机", "寂静岭", "龙之信条",
     "死亡搁浅", "往日不再", "地平线", "极限竞速",
     "刀锋战士", "超人", "蝙蝠侠", "蜘蛛侠", "复仇者联盟",
     "明日之子", "沙丘", "三体",
 ]
+
+_keywords_data = _load_keywords()
+_KNOWN_GAME_NAMES = _keywords_data["known_game_names"]
+_DETAIL_PATTERNS = _keywords_data["detail_patterns"]
 
 
 def extract_keyword(title):
@@ -493,13 +657,12 @@ def extract_keyword(title):
     # 从清理后的文本中提取2-6字的中文片段，取最长的
     segments = re.findall(r'[\u4e00-\u9fa5]{2,6}', clean)
     if segments:
-        # 取最长的片段，避免硬截前4字产生"黑神"这种碎片
-        best = max(segments, key=len)
-        for bad in _BAD_PARTS:
-            if bad in best:
+        # 从最长候选开始，真正过滤掉包含无意义片段的关键词
+        for best in sorted(segments, key=len, reverse=True):
+            if any(bad in best for bad in _BAD_PARTS):
                 continue
-        if 2 <= len(best) <= 6:
-            return best
+            if 2 <= len(best) <= 6:
+                return best
 
     # 兜底：如果以上都没匹配到，取前2-4字
     if len(clean) >= 2:
@@ -708,21 +871,38 @@ def generate_comment_template(title, content=""):
     return "SKIP"
 
 
-def _call_deepseek_api(url, headers, data, logger):
-    """发起一次 API 请求，返回 (raw_content, returned_model)"""
+def _call_deepseek_api(url, headers, data, logger, max_retries=3):
+    """发起 API 请求，对可重试错误（429/5xx/网络超时）使用指数退避"""
     import requests
-    resp = requests.post(url, headers=headers, json=data, timeout=20)
-    resp.raise_for_status()
-    result = resp.json()
-    returned_model = result.get("model", "未知")
-    logger.info("AI 返回模型: %s", returned_model)
-    raw_content = result["choices"][0]["message"]["content"]
-    return raw_content, returned_model
+    retryable_codes = {429, 500, 502, 503, 504}
+    for attempt in range(max_retries + 1):
+        try:
+            resp = requests.post(url, headers=headers, json=data, timeout=20)
+            resp.raise_for_status()
+            result = resp.json()
+            returned_model = result.get("model", "未知")
+            logger.info("AI 返回模型: %s", returned_model)
+            raw_content = result["choices"][0]["message"]["content"]
+            return raw_content, returned_model
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else 0
+            if status in retryable_codes and attempt < max_retries:
+                wait = 2 ** (attempt + 1)
+                logger.warning("API 返回 %d，%d 秒后重试 (%d/%d)", status, wait, attempt + 1, max_retries)
+                time.sleep(wait)
+                continue
+            raise
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            if attempt < max_retries:
+                wait = 2 ** (attempt + 1)
+                logger.warning("网络错误，%d 秒后重试 (%d/%d): %s", wait, attempt + 1, max_retries, e)
+                time.sleep(wait)
+                continue
+            raise
 
 
 def generate_comment_ai(title, content, api_key, base_url, model):
-    """AI 模式：让 AI 直接生成评论或 SKIP，含空返回重试和429重试"""
-    import requests as _requests
+    """AI 模式：让 AI 直接生成评论或 SKIP，含空返回重试和指数退避"""
     logger = logging.getLogger("caimogu")
     try:
         base_url = (base_url or "https://api.deepseek.com/v1").rstrip("/")
@@ -764,15 +944,7 @@ def generate_comment_ai(title, content, api_key, base_url, model):
         }
 
         logger.info("AI 请求: base_url=%s, model=%s", base_url, model)
-        try:
-            raw_content, _ = _call_deepseek_api(url, headers, data, logger)
-        except _requests.exceptions.HTTPError as e:
-            if e.response.status_code == 429:
-                logger.warning("触发429限流，等待3秒后重试一次")
-                time.sleep(3)
-                raw_content, _ = _call_deepseek_api(url, headers, data, logger)
-            else:
-                raise
+        raw_content, _ = _call_deepseek_api(url, headers, data, logger)
 
         logger.info("AI 原始返回: %s", raw_content)
         comment = _normalize_generated_comment(raw_content)
@@ -793,13 +965,7 @@ def generate_comment_ai(title, content, api_key, base_url, model):
                 "temperature": 0.9
             }
             time.sleep(1)
-            try:
-                raw_content2, _ = _call_deepseek_api(url, headers, retry_data, logger)
-            except _requests.exceptions.HTTPError as e:
-                if e.response.status_code == 429:
-                    logger.warning("重试也触发429，回退模板")
-                    return generate_comment_template(title, content)
-                raise
+            raw_content2, _ = _call_deepseek_api(url, headers, retry_data, logger)
             logger.info("AI 重试返回: %s", raw_content2)
             comment = _normalize_generated_comment(raw_content2)
             logger.info("AI 重试清洗后: %s (字数=%d)", comment, _comment_len(comment))
@@ -812,6 +978,13 @@ def generate_comment_ai(title, content, api_key, base_url, model):
 
         if any(part in comment for part in _HARD_BANNED_PARTS):
             logger.warning("AI 回复含套话，回退模板: %s", comment)
+            return generate_comment_template(title, content)
+
+        # AI 输出必须经过与模板模式相同的本地规则校验。
+        if not _is_reply_valid(comment, title, content):
+            logger.warning(
+                "AI 回复未通过本地规则校验，回退模板: %s", comment
+            )
             return generate_comment_template(title, content)
 
         return comment
@@ -828,6 +1001,213 @@ def generate_comment(title, content, config):
         model = config.get("deepseek_model", "deepseek-chat")
         return generate_comment_ai(title, content, api_key, base_url, model)
     return generate_comment_template(title, content)
+
+
+# ============================================================
+#  6.5 V3.2 评论质量评分、重复检测与状态机
+# ============================================================
+
+# 帖子状态机
+POST_STATUS = (
+    "DISCOVERED",   # 发现候选帖
+    "SKIPPED",      # 判断为不可回复，跳过
+    "GENERATED",    # 评论已生成
+    "SUBMITTED",    # 已点击提交
+    "SUCCESS",      # 确认成功
+    "FAILED",       # 确认失败
+    "UNKNOWN",      # 状态未知
+    "VERIFIED",     # UNKNOWN 经验证确认为成功
+    "EXPIRED",      # UNKNOWN 超过3天过期
+    "AUTH_EXPIRED", # 登录失效
+)
+
+# 质量评分权重
+_SCORE_WEIGHTS = {
+    "keyword": 20,    # 提及标题核心对象
+    "detail": 25,     # 引用正文具体细节
+    "type_match": 20, # 与帖子类型匹配
+    "no_cliche": 15,  # 没有套话
+    "length": 10,     # 长度合适
+    "low_repeat": 10, # 与历史评论重复度低
+}
+
+
+def score_comment_quality(comment, title, content):
+    """评估评论质量，返回 0-100 分及各维度得分明细"""
+    scores = {}
+    comment_clean = _normalize_generated_comment(comment)
+    if not comment_clean or comment_clean.upper() == "SKIP":
+        return 0, {}
+
+    # 1. 提及标题核心对象（+20）
+    keyword = extract_keyword(title or "") or ""
+    if keyword and keyword in comment_clean:
+        scores["keyword"] = _SCORE_WEIGHTS["keyword"]
+    elif keyword and len(keyword) >= 2:
+        # 部分匹配（关键词的前2字出现在评论中）
+        if keyword[:2] in comment_clean:
+            scores["keyword"] = _SCORE_WEIGHTS["keyword"] // 2
+
+    # 2. 引用正文具体细节（+25）
+    detail = _extract_detail(title, content) or ""
+    if detail and detail in comment_clean:
+        scores["detail"] = _SCORE_WEIGHTS["detail"]
+    elif detail and len(detail) >= 2 and detail[:2] in comment_clean:
+        scores["detail"] = _SCORE_WEIGHTS["detail"] // 2
+
+    # 3. 与帖子类型匹配（+20）
+    title_type = detect_title_type((title or "") + " " + (content or "")[:120])
+    type_keywords = {
+        "regret": ["可惜", "难受", "期待", "失望", "白费"],
+        "help": ["问题", "遇到", "排查", "解决", "兼容"],
+        "rumor": ["观望", "爆料", "消息", "等官方", "辟谣"],
+        "sales": ["成绩", "销量", "竞争力", "口碑", "反馈"],
+        "update": ["改动", "更新", "优化", "方向", "落地"],
+        "recommend": ["推荐", "对口", "踩坑", "老牌", "方向"],
+        "luck": ["运气", "抽", "保底", "欧", "非"],
+        "media": ["改编", "选角", "风险", "阵容", "核心"],
+    }
+    type_words = type_keywords.get(title_type, [])
+    if any(w in comment_clean for w in type_words):
+        scores["type_match"] = _SCORE_WEIGHTS["type_match"]
+
+    # 4. 没有套话（+15）
+    if not any(part in comment_clean for part in _HARD_BANNED_PARTS):
+        scores["no_cliche"] = _SCORE_WEIGHTS["no_cliche"]
+
+    # 5. 长度合适（+10）：15-40字为合适
+    clen = _comment_len(comment_clean)
+    if 15 <= clen <= 40:
+        scores["length"] = _SCORE_WEIGHTS["length"]
+    elif 10 <= clen <= 50:
+        scores["length"] = _SCORE_WEIGHTS["length"] // 2
+
+    # 6. 与历史评论重复度低（+10）：由调用方传入 recent_comments 后计算
+    # 此项在 is_comment_too_similar 检查后由调用方补充
+    # 默认给满分，如果检测到相似则扣分
+    scores["low_repeat"] = _SCORE_WEIGHTS["low_repeat"]
+
+    total = sum(scores.values())
+    return total, scores
+
+
+def _comment_ngrams(text, n=2):
+    """提取评论的字符 n-gram 集合"""
+    text = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9]', '', text)
+    if len(text) < n:
+        return {text} if text else set()
+    return {text[i:i+n] for i in range(len(text) - n + 1)}
+
+
+def comment_similarity(text1, text2, n=2):
+    """计算两条评论的 Jaccard 相似度（0-1）"""
+    if not text1 or not text2:
+        return 0.0
+    grams1 = _comment_ngrams(text1, n)
+    grams2 = _comment_ngrams(text2, n)
+    if not grams1 or not grams2:
+        return 0.0
+    intersection = grams1 & grams2
+    union = grams1 | grams2
+    return len(intersection) / len(union) if union else 0.0
+
+
+def get_recent_comments(days=7):
+    """获取最近 N 天内成功发表的评论列表"""
+    data = load_json(PATHS["replied"], {})
+    records = data.get("post_records", [])
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
+    return [r.get("comment", "") for r in records
+            if r.get("date", "") >= cutoff
+            and r.get("status") == "SUCCESS"
+            and r.get("comment")]
+
+
+def is_comment_too_similar(comment, recent_comments, threshold=0.6):
+    """检查评论是否与历史评论过于相似，返回 (is_similar, max_similarity, similar_comment)"""
+    if not comment or not recent_comments:
+        return False, 0.0, ""
+    max_sim = 0.0
+    most_similar = ""
+    for prev in recent_comments:
+        sim = comment_similarity(comment, prev)
+        if sim > max_sim:
+            max_sim = sim
+            most_similar = prev
+    return max_sim >= threshold, max_sim, most_similar
+
+
+def record_post_execution(post_id, title, status, comment=None, comment_source=None,
+                           attempts=1, duration_ms=0, verification=None, error=None,
+                           quality_score=None):
+    """记录单个帖子的完整执行结果到 replied_posts.json"""
+    data = load_json(PATHS["replied"], {})
+    records = data.get("post_records", [])
+    entry = {
+        "post_id": post_id,
+        "date": date.today().isoformat(),
+        "time": datetime.now().strftime("%H:%M:%S"),
+        "title": (title or "")[:80],
+        "status": status,
+        "comment": comment or "",
+        "comment_source": comment_source or "",
+        "attempts": attempts,
+        "duration_ms": duration_ms,
+        "verification": verification or "",
+        "error": error,
+    }
+    if quality_score is not None:
+        entry["quality_score"] = quality_score
+    records.append(entry)
+    # 只保留最近200条记录
+    if len(records) > 200:
+        records = records[-200:]
+    data["post_records"] = records
+    save_json(PATHS["replied"], data)
+
+
+def generate_daily_report(logger, stats):
+    """生成并输出每日签到报告"""
+    report_lines = [
+        "=" * 50,
+        "采蘑菇签到报告",
+        "=" * 50,
+        f"目标：{stats.get('target', 0)}",
+        f"成功：{stats.get('success', 0)}   "
+        f"失败：{stats.get('failed', 0)}   "
+        f"UNKNOWN：{stats.get('unknown', 0)}   "
+        f"SKIP：{stats.get('skipped', 0)}",
+        f"AI评论：{stats.get('ai_comments', 0)}   "
+        f"模板评论：{stats.get('template_comments', 0)}",
+    ]
+    quality_scores = stats.get("quality_scores", [])
+    if quality_scores:
+        avg_q = sum(quality_scores) / len(quality_scores)
+        report_lines.append(f"平均评论质量：{avg_q:.1f}")
+    else:
+        report_lines.append("平均评论质量：N/A")
+    duration_s = stats.get("duration_s", 0)
+    if duration_s > 0:
+        mins, secs = divmod(int(duration_s), 60)
+        report_lines.append(f"耗时：{mins}分{secs}秒")
+    report_lines.append("=" * 50)
+
+    report_text = "\n".join(report_lines)
+    for line in report_lines:
+        logger.info(line)
+
+    # 写入 daily_report.json
+    report_data = {
+        "date": date.today().isoformat(),
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        **stats,
+        "avg_quality": round(sum(quality_scores) / len(quality_scores), 1) if quality_scores else 0,
+    }
+    report_path = SCRIPT_DIR / "daily_report.json"
+    save_json(report_path, report_data)
+
+    return report_text
+
 
 # ============================================================
 #  7. Playwright 工具函数
@@ -863,8 +1243,8 @@ def create_context(playwright, *, headless=True, storage_state=None):
     """创建浏览器上下文，返回 (browser, context)"""
     browser = playwright.chromium.launch(headless=headless)
     context = browser.new_context(
-        viewport={"width": 1280, "height": 800},
-        user_agent=USER_AGENT,
+        viewport=random.choice(VIEWPORT_SIZES),
+        user_agent=random.choice(USER_AGENTS),
         storage_state=storage_state,
     )
     return browser, context
@@ -873,15 +1253,29 @@ def create_context(playwright, *, headless=True, storage_state=None):
 #  8. 页面操作
 # ============================================================
 
+def goto_with_retry(page, url, logger, timeout=90000, retries=2):
+    """带重试的页面导航，网络抖动时不浪费时间"""
+    for attempt in range(retries + 1):
+        try:
+            page.goto(url, timeout=timeout, wait_until="domcontentloaded")
+            return True
+        except Exception as e:
+            if attempt < retries:
+                wait = 5 * (attempt + 1)
+                logger.warning("页面加载失败(%s)，%d秒后重试(%d/%d): %s", url, wait, attempt + 1, retries, e)
+                time.sleep(wait)
+            else:
+                logger.warning("页面加载重试%d次仍失败: %s", retries, url)
+                return False
+    return False
+
+
 def get_post_list(page, config, count, logger):
     """从板块页面获取帖子列表，自动跳过置顶帖"""
     circle_url = config["circle_url"]
     logger.info("正在获取帖子列表: %s", circle_url)
-    try:
-        page.goto(circle_url, timeout=config.get("page_timeout_ms", 90000),
-                  wait_until="domcontentloaded")
-    except Exception as e:
-        logger.warning("板块页面加载超时，尝试继续解析已加载内容: %s", e)
+    timeout = config.get("page_timeout_ms", 90000)
+    goto_with_retry(page, circle_url, logger, timeout=timeout)
     page.wait_for_timeout(3000)
 
     try:
@@ -893,7 +1287,9 @@ def get_post_list(page, config, count, logger):
     items = page.query_selector_all(SELECTORS["post_item"])
     posts = []
     skipped_pinned = 0
-    max_candidates = max(count * 8, count + 10)
+    # 给“内容不可回复/已回复/失败”的情况留出更大的候选池。
+    # 当前版本不假设网站的分页 URL 结构，避免因猜测分页规则导致失效。
+    max_candidates = max(count * 15, count + 30)
 
     for item in items[:max_candidates]:
         try:
@@ -906,7 +1302,10 @@ def get_post_list(page, config, count, logger):
                 continue
 
             item_class = item.get_attribute("class") or ""
-            item_html = item.inner_html()[:500] if hasattr(item, "inner_html") else ""
+            try:
+                item_html = item.inner_html()[:500]
+            except Exception:
+                item_html = ""
             is_pinned = (
                 "sticky" in item_class.lower()
                 or "pin" in item_class.lower()
@@ -974,7 +1373,7 @@ def input_comment(page, editor, comment, logger):
 
     def focus_quill():
         """用 Quill API 聚焦编辑器（比 DOM .focus() 更可靠）"""
-        dismiss_popup(page, logger)
+        close_safe_popup(page, logger)
         try:
             page.evaluate(
                 '() => { var ed = document.querySelector(".ql-editor"); '
@@ -1043,7 +1442,7 @@ def input_comment(page, editor, comment, logger):
         pass
 
     # 方式三：fill
-    dismiss_popup(page, logger)
+    close_safe_popup(page, logger)
     try:
         editor.fill(comment, timeout=5000)
         page.wait_for_timeout(500)
@@ -1077,9 +1476,10 @@ def input_comment(page, editor, comment, logger):
     return False
 
 
-def dismiss_popup(page, logger):
-    """关闭 SweetAlert2 等遮罩弹窗，防止遮挡编辑器与提交按钮"""
-    # 先读取弹窗内容（用于诊断提交失败原因）
+def inspect_popup(page, logger):
+    """读取 SweetAlert2 等弹窗内容，不关闭任何弹窗。
+    业务流程开始时调用，避免误关包含关键错误信息的弹窗。
+    """
     try:
         info = page.evaluate(
             '() => { var c = document.querySelector(".swal2-container"); '
@@ -1090,8 +1490,18 @@ def dismiss_popup(page, logger):
         )
         if info and (info.get("title") or info.get("content")):
             logger.info("页面弹窗: [%s] %s", info.get("title", ""), info.get("content", ""))
+            return info
     except Exception:
         pass
+    return None
+
+
+def close_safe_popup(page, logger):
+    """关闭 SweetAlert2 等遮罩弹窗，防止遮挡编辑器与提交按钮。
+    输入/提交前调用，先记录弹窗内容再关闭可关闭的弹窗。
+    """
+    # 先读取弹窗内容（用于诊断提交失败原因）
+    inspect_popup(page, logger)
 
     # 优先用 Escape 与按钮关闭
     try:
@@ -1107,27 +1517,173 @@ def dismiss_popup(page, logger):
                 page.wait_for_timeout(300)
         except Exception:
             continue
-    # 兜底：直接移除遮罩层
+    # 不再直接删除未知弹窗 DOM。
+    # SweetAlert 可能承载登录失效、风控、验证码或提交失败等关键信息，
+    # 强行 remove 可能导致后续逻辑误判。
+
+
+def get_reply_editor_text(page):
+    """读取当前回复编辑器文本"""
     try:
-        removed = page.evaluate(
-            '() => { var c = document.querySelector(".swal2-container"); '
-            'if (c) { c.remove(); return true; } return false; }'
+        return page.evaluate(
+            "() => { const ed = document.querySelector('.ql-editor'); "
+            "return ed ? ed.innerText.trim() : ''; }"
         )
-        if removed:
-            logger.info("已移除页面弹窗遮罩")
     except Exception:
-        pass
+        return ""
+
+
+def get_visible_success_message(page):
+    """读取页面上常见的成功提示；未知提示不做猜测"""
+    selectors = (
+        ".swal2-container .swal2-title",
+        ".swal2-container .swal2-html-container",
+        ".toast-success",
+        ".alert-success",
+        ".msg-success",
+    )
+    for sel in selectors:
+        try:
+            elements = page.query_selector_all(sel)
+            for el in elements:
+                if el.is_visible():
+                    txt = el.inner_text().strip()
+                    if txt:
+                        return txt
+        except Exception:
+            continue
+    return ""
+
+
+def get_visible_error_message(page):
+    """读取页面上常见的错误提示"""
+    selectors = (
+        ".swal2-container .swal2-title",
+        ".swal2-container .swal2-html-container",
+        SELECTORS["error"],
+    )
+    for sel in selectors:
+        try:
+            elements = page.query_selector_all(sel)
+            for el in elements:
+                if el.is_visible():
+                    txt = el.inner_text().strip()
+                    if txt:
+                        return txt
+        except Exception:
+            continue
+    return ""
+
+
+def get_comment_count(page, logger):
+    """获取当前帖子页面的评论/回复数量，用于检测提交后新评论是否出现
+
+    返回 None 表示无法检测到评论 DOM（与 0 条评论区分开）
+    """
+    try:
+        count = page.evaluate(
+            '''() => {
+                var selectors = [
+                    ".comment-list .comment-item",
+                    ".reply-list .reply-item",
+                    "#comments .comment",
+                    ".post-comments .comment",
+                    ".comment-list .item",
+                    ".reply-item",
+                    "[class*='comment'] [class*='item']",
+                    "[class*='reply'] [class*='item']"
+                ];
+                for (var i = 0; i < selectors.length; i++) {
+                    var items = document.querySelectorAll(selectors[i]);
+                    if (items.length > 0) return items.length;
+                }
+                return null;
+            }'''
+        )
+        return count
+    except Exception:
+        return None
+
+
+def wait_reply_result(page, logger, previous_editor_text, initial_comments=None, post_id=None):
+    """
+    提交后判断结果：
+      True  = 明确成功
+      False = 明确失败
+      None  = 状态未知，不重复提交
+
+    initial_comments: 提交前的评论数（由 reply_to_post 在提交前获取并传入）
+    """
+    success_words = ("成功", "发表成功", "回复成功", "发布成功", "评论成功")
+    error_words = ("失败", "错误", "禁止", "频繁", "限制", "验证码", "未登录", "登录")
+
+    if initial_comments is not None:
+        logger.info("提交前评论数: %d", initial_comments)
+
+    for _ in range(10):
+        page.wait_for_timeout(1000)
+
+        # 1. 检查新评论是否出现（最可靠的成功信号）
+        current_comments = get_comment_count(page, logger)
+        if initial_comments is not None and current_comments is not None:
+            if current_comments > initial_comments:
+                logger.info("评论数从 %d 增加到 %d，确认提交成功", initial_comments, current_comments)
+                return True
+
+        # 2. 检查明确成功提示
+        msg = get_visible_success_message(page)
+        if msg:
+            logger.info("检测到提交提示: %s", msg)
+            if any(word in msg for word in success_words):
+                return True
+            if any(word in msg for word in error_words):
+                return False
+
+        # 3. 检查明确错误提示
+        err = get_visible_error_message(page)
+        if err:
+            logger.warning("检测到提交错误提示: %s", err)
+            if any(word in err for word in error_words):
+                return False
+
+        # 4. 编辑器清空只能作为"可能成功"的辅助信号，
+        # 不能单独判定成功；继续等待页面状态变化。
+        current = get_reply_editor_text(page)
+        if not current and previous_editor_text:
+            logger.info("回复编辑器已清空，继续等待最终提交状态")
+
+    logger.warning("提交结果无法明确确认，标记为未知状态")
+    return None
 
 
 def submit_reply(page, logger):
-    """查找并点击提交按钮，返回是否成功"""
-    dismiss_popup(page, logger)
-    # 检查提交按钮是否被禁用，若禁用则先触发编辑器更新
+    """查找并点击提交按钮；只负责发起一次提交"""
+    close_safe_popup(page, logger)
+
+    # 防止双击重复提交：检查JS标志位
+    try:
+        already_submitted = page.evaluate('() => window.__caimogu_submit_flag === true')
+        if already_submitted:
+            logger.warning("检测到重复提交标志，跳过本次提交")
+            return False
+    except Exception:
+        pass
+
+    # 检查提交按钮是否被禁用，遍历所有提交选择器
     try:
         disabled = page.evaluate(
-            '() => { var btn = document.querySelector(".btn-reply-root"); '
-            'if(!btn) return false; '
-            'return btn.disabled || btn.classList.contains("disabled") || btn.getAttribute("aria-disabled") === "true"; }'
+            '''() => {
+                var selectors = [".btn-reply-root", 'button:has-text("回复")',
+                    'button:has-text("发表")', 'button:has-text("提交")',
+                    ".submit-btn", ".btn-publish", ".btn-send", 'input[type="submit"]'];
+                for (var i = 0; i < selectors.length; i++) {
+                    var btn = document.querySelector(selectors[i]);
+                    if (btn) {
+                        return btn.disabled || btn.classList.contains("disabled") || btn.getAttribute("aria-disabled") === "true";
+                    }
+                }
+                return false;
+            }'''
         )
         if disabled:
             logger.info("提交按钮处于禁用状态，尝试触发编辑器更新")
@@ -1143,27 +1699,68 @@ def submit_reply(page, logger):
     except Exception:
         pass
 
-    btn, sel = first_element(page, SELECTORS["submit"])
+    # 优先在编辑器附近查找提交按钮，避免点到帖子列表中的回复按钮
+    btn, sel = None, None
+    try:
+        handle = page.evaluate_handle(
+            '''() => {
+                var ed = document.querySelector(".ql-editor");
+                if (!ed) return null;
+                var container = ed.closest("form") || ed.closest(".comment-form")
+                    || ed.closest(".reply-box") || ed.parentElement.parentElement;
+                if (!container) return null;
+                var candidates = [".btn-reply-root", ".btn-publish", ".btn-send",
+                    ".submit-btn", 'button[type="submit"]'];
+                for (var i = 0; i < candidates.length; i++) {
+                    var b = container.querySelector(candidates[i]);
+                    if (b) return b;
+                }
+                return null;
+            }'''
+        )
+        btn = handle.as_element()
+        if btn:
+            sel = "editor-container"
+    except Exception:
+        pass
+
+    # 兜底：全局查找
+    if not btn:
+        btn, sel = first_element(page, SELECTORS["submit"])
+
     if btn:
         try:
+            # 设置提交标志位，15秒后自动重置（防止异常导致永久阻塞）
+            page.evaluate('() => { window.__caimogu_submit_flag = true; setTimeout(() => { window.__caimogu_submit_flag = false; }, 15000); }')
             btn.click()
             logger.info("点击提交按钮: %s", sel)
             page.wait_for_timeout(2000)
             return True
         except Exception as e:
+            # 提交失败，重置标志位
+            try:
+                page.evaluate('() => { window.__caimogu_submit_flag = false; }')
+            except Exception:
+                pass
             logger.error("点击提交按钮失败: %s", e)
             # 弹窗残留遮挡时，用 JS 直接派发点击
             try:
+                page.evaluate('() => { window.__caimogu_submit_flag = true; setTimeout(() => { window.__caimogu_submit_flag = false; }, 15000); }')
                 page.evaluate("(el) => el.click()", btn)
                 logger.info("JS 兜底点击提交按钮: %s", sel)
                 page.wait_for_timeout(2000)
                 return True
             except Exception as e2:
+                try:
+                    page.evaluate('() => { window.__caimogu_submit_flag = false; }')
+                except Exception:
+                    pass
                 logger.error("JS 兜底点击仍失败: %s", e2)
                 return False
 
     # 备选：Ctrl+Enter
     try:
+        page.evaluate('() => { window.__caimogu_submit_flag = true; setTimeout(() => { window.__caimogu_submit_flag = false; }, 15000); }')
         page.keyboard.press("Control+Enter")
         logger.info("通过 Ctrl+Enter 提交")
         page.wait_for_timeout(2000)
@@ -1173,29 +1770,55 @@ def submit_reply(page, logger):
         return False
 
 
-def reply_to_post(page, post_url, config, logger):
-    """打开帖子并回复（页面交互层，评论生成委托给 generate_comment）"""
-    logger.info("正在打开帖子: %s", post_url)
+def reply_to_post(page, post_url, config, logger, post_id=None):
+    """打开帖子并回复（页面交互层，评论生成委托给 generate_comment）
+    返回 (status, comment, meta): status="SUCCESS"/"FAILED"/"UNKNOWN"/"AUTH_EXPIRED"
+    meta 包含 quality_score, comment_source, duration_ms, title, verification, error
+    """
+    start_time = time.time()
+    pid = post_id or normalize_post_id(post_url)
+    logger.info("[POST %s] DISCOVERED", pid)
+
+    meta = {"quality_score": 0, "comment_source": "", "duration_ms": 0,
+            "title": "", "verification": "", "error": None}
 
     try:
-        try:
-            page.goto(post_url, timeout=config.get("page_timeout_ms", 90000),
-                      wait_until="domcontentloaded")
-        except Exception as e:
-            logger.warning("帖子页面加载超时，尝试继续: %s", e)
+        timeout = config.get("page_timeout_ms", 90000)
+        goto_with_retry(page, post_url, logger, timeout=timeout)
         page.wait_for_timeout(3000)
-        dismiss_popup(page, logger)
+        inspect_popup(page, logger)
 
         # 提取帖子信息
         title, content = extract_post_info(page)
+        meta["title"] = (title or "")[:80]
         logger.info("帖子标题: %s", title)
 
         # 生成评论（纯逻辑，不涉及页面操作）
+        comment_source = "ai" if config.get("deepseek_api_key") else "template"
         comment = generate_comment(title, content, config)
         if comment == "SKIP":
-            logger.info("判断结果: SKIP，跳过此帖")
-            return False
-        logger.info("生成评论: %s", comment)
+            logger.info("[POST %s] SKIPPED - 判断为不可回复", pid)
+            meta["duration_ms"] = int((time.time() - start_time) * 1000)
+            record_post_execution(pid, title, "SKIPPED", error="judged_skip")
+            return ("FAILED", None, meta)
+        logger.info("[POST %s] GENERATED: %s", pid, comment)
+        meta["comment_source"] = comment_source
+
+        # 评论质量评分
+        quality_score, quality_detail = score_comment_quality(comment, title, content)
+
+        # 评论重复检测
+        recent = get_recent_comments(days=7)
+        if recent:
+            is_sim, max_sim, sim_comment = is_comment_too_similar(comment, recent)
+            if is_sim:
+                logger.warning("[POST %s] 评论与历史相似度 %.0f%%，扣减重复分: %s",
+                               pid, max_sim * 100, sim_comment[:30])
+                quality_detail.pop("low_repeat", None)
+                quality_score = sum(quality_detail.values())
+
+        logger.info("[POST %s] 质量评分: %d/100 (%s)", pid, quality_score, quality_detail)
+        meta["quality_score"] = quality_score
 
         # 滚动到底部
         page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
@@ -1205,67 +1828,132 @@ def reply_to_post(page, post_url, config, logger):
         editor = find_editor(page, logger)
         if not editor:
             logger.error("未找到回复输入框，跳过此帖子")
-            return False
+            meta["duration_ms"] = int((time.time() - start_time) * 1000)
+            meta["error"] = "editor_not_found"
+            record_post_execution(pid, title, "FAILED", error="editor_not_found",
+                                   duration_ms=meta["duration_ms"])
+            return ("FAILED", None, meta)
 
         # 输入评论
         if not input_comment(page, editor, comment, logger):
-            return False
+            meta["duration_ms"] = int((time.time() - start_time) * 1000)
+            meta["error"] = "input_failed"
+            record_post_execution(pid, title, "FAILED", comment=comment,
+                                   comment_source=comment_source,
+                                   duration_ms=meta["duration_ms"], error="input_failed")
+            return ("FAILED", None, meta)
 
-        # 提交回复
+        # 提交回复前保存编辑器内容。
+        previous_editor_text = get_reply_editor_text(page)
+        if not previous_editor_text:
+            logger.error("提交前读取不到编辑器内容，停止提交")
+            meta["duration_ms"] = int((time.time() - start_time) * 1000)
+            meta["error"] = "editor_empty"
+            record_post_execution(pid, title, "FAILED", comment=comment,
+                                   comment_source=comment_source,
+                                   duration_ms=meta["duration_ms"], error="editor_empty")
+            return ("FAILED", None, meta)
+
+        # 提交前记录评论数，提交后检测是否增加（核心修复）
+        initial_comments = get_comment_count(page, logger)
+
+        logger.info("[POST %s] SUBMITTED", pid)
+        # 只发起一次提交。状态未知时绝不自动再次点击，避免重复回复。
         if not submit_reply(page, logger):
-            return False
+            meta["duration_ms"] = int((time.time() - start_time) * 1000)
+            meta["error"] = "submit_failed"
+            record_post_execution(pid, title, "FAILED", comment=comment,
+                                   comment_source=comment_source,
+                                   duration_ms=meta["duration_ms"], error="submit_failed")
+            return ("FAILED", None, meta)
 
-        # 等待提交完成并验证（最多重试3次）
-        for attempt in range(3):
-            page.wait_for_timeout(3000)
+        result = wait_reply_result(page, logger, previous_editor_text,
+                                   initial_comments=initial_comments, post_id=post_id)
 
-            # 先检查 SweetAlert2 弹窗内容（可能包含"未登录"等关键错误）
-            try:
-                swal_title = page.evaluate(
-                    '() => { var t = document.querySelector(".swal2-container .swal2-title"); '
-                    'return t ? t.innerText.trim() : ""; }'
-                )
-                if swal_title:
-                    logger.warning("提交后弹窗提示: %s", swal_title)
-                    if "登录" in swal_title or "登陆" in swal_title:
-                        logger.error("登录状态已失效！请重新运行 --login 配置登录")
-                        return "AUTH_EXPIRED"
-            except Exception:
-                pass
+        meta["duration_ms"] = int((time.time() - start_time) * 1000)
 
-            dismiss_popup(page, logger)
+        # 登录失效需要单独处理。
+        if result is False:
+            err = get_visible_error_message(page)
+            if "登录" in err or "登陆" in err:
+                logger.error("登录状态已失效！请重新运行 --login 配置登录")
+                logger.info("[POST %s] AUTH_EXPIRED", pid)
+                meta["error"] = "auth_expired"
+                record_post_execution(pid, title, "AUTH_EXPIRED", comment=comment,
+                                       comment_source=comment_source,
+                                       duration_ms=meta["duration_ms"], error="auth_expired")
+                return ("AUTH_EXPIRED", None, meta)
 
-            # 检查错误提示
-            try:
-                error_el = page.query_selector(SELECTORS["error"])
-                if error_el:
-                    error_text = error_el.inner_text()
-                    if error_text and len(error_text) > 2:
-                        logger.warning("页面提示: %s", error_text)
-            except Exception:
-                pass
+        if result is True:
+            logger.info("[POST %s] SUCCESS", pid)
+            # 成功提示出现后再关闭可关闭的提示，不删除未知弹窗。
+            close_safe_popup(page, logger)
+            meta["verification"] = "comment_count"
+            record_post_execution(pid, title, "SUCCESS", comment=comment,
+                                   comment_source=comment_source,
+                                   quality_score=quality_score,
+                                   duration_ms=meta["duration_ms"],
+                                   verification="comment_count")
+            return ("SUCCESS", comment, meta)
 
-            # 验证编辑器是否已清空
-            try:
-                remaining = page.evaluate(
-                    '() => { var ed = document.querySelector(".ql-editor"); '
-                    'return ed ? ed.innerText.trim() : ""; }'
-                )
-                if not remaining or len(remaining) < 5:
-                    logger.info("回复提交完成")
-                    return True
-                if attempt < 2:
-                    logger.warning("第%d次检查编辑器仍有内容，重试提交", attempt + 1)
-                    submit_reply(page, logger)
-            except Exception:
-                pass
+        if result is None:
+            # 状态未知：不要把它记为成功，也不要再次提交。
+            logger.warning("[POST %s] UNKNOWN - 状态未知，不重复提交", pid)
+            record_post_execution(pid, title, "UNKNOWN", comment=comment,
+                                   comment_source=comment_source,
+                                   quality_score=quality_score,
+                                   duration_ms=meta["duration_ms"])
+            return ("UNKNOWN", comment, meta)
 
-        logger.warning("提交后编辑器仍有内容，回复可能未成功提交")
-        return False
+        logger.info("[POST %s] FAILED", pid)
+        meta["error"] = "result_false"
+        record_post_execution(pid, title, "FAILED", comment=comment,
+                               comment_source=comment_source,
+                               duration_ms=meta["duration_ms"], error="result_false")
+        return ("FAILED", None, meta)
 
     except Exception as e:
         logger.error("回复帖子时出错: %s", e)
-        return False
+        meta["duration_ms"] = int((time.time() - start_time) * 1000)
+        meta["error"] = str(e)
+        record_post_execution(pid, meta.get("title", ""), "FAILED",
+                               error=str(e), duration_ms=meta["duration_ms"])
+        return ("FAILED", None, meta)
+
+
+def verify_existing_comment(page, expected_comment, logger):
+    """检查页面上是否已存在之前 UNKNOWN 状态的评论文本
+
+    保守处理：只能证明相同文本出现在页面上，不能确定是当前账号发表的。
+    返回 True=明确找到 / False=明确没找到 / None=无法检测
+    """
+    if not expected_comment:
+        return None
+    try:
+        found = page.evaluate(
+            '''(expected) => {
+                var selectors = [
+                    ".comment-list .comment-item",
+                    ".reply-list .reply-item",
+                    "#comments .comment",
+                    ".post-comments .comment",
+                    "[class*='comment'] [class*='item']",
+                    "[class*='reply'] [class*='item']"
+                ];
+                for (var i = 0; i < selectors.length; i++) {
+                    var items = document.querySelectorAll(selectors[i]);
+                    for (var j = 0; j < items.length; j++) {
+                        if (items[j].textContent.includes(expected)) return true;
+                    }
+                }
+                return false;
+            }''',
+            expected_comment
+        )
+        return bool(found)
+    except Exception:
+        return None
+
 
 # ============================================================
 #  9. 登录流程
@@ -1338,7 +2026,7 @@ def check_login_status(page, logger):
         logger.warning("检查令牌过期时间时出错: %s", e)
 
     try:
-        page.goto("https://www.caimogu.cc/", timeout=60000, wait_until="domcontentloaded")
+        goto_with_retry(page, "https://www.caimogu.cc/", logger, timeout=60000)
         page.wait_for_timeout(2000)
 
         login_links = page.query_selector_all(SELECTORS["login_link"])
@@ -1349,10 +2037,19 @@ def check_login_status(page, logger):
                     return False
             except Exception:
                 continue
+
+        # 登录有效，访问个人中心触发服务器刷新 token
+        try:
+            goto_with_retry(page, "https://www.caimogu.cc/user/setting.html", logger, timeout=30000)
+            page.wait_for_timeout(1000)
+            logger.info("已访问个人中心，可能刷新登录令牌")
+        except Exception:
+            pass
+
         return True
     except Exception as e:
         logger.warning("检查登录状态时出错: %s", e)
-        return True
+        return False
 
 # ============================================================
 #  10. 签到流程
@@ -1399,6 +2096,25 @@ def run_signin():
     remaining_count = reply_count - already_count
     logger.info("今天已记录成功回复 %d 条，本次还需要回复 %d 条。", already_count, remaining_count)
 
+    lock = SingleInstanceLock(PATHS["lock"])
+    if not lock.acquire():
+        logger.warning("另一个签到进程正在运行，本次跳过")
+        return
+
+    try:
+        _run_signin_locked(logger, config, reply_count, headless, already_count, remaining_count, sync_playwright)
+    finally:
+        lock.release()
+
+
+def _run_signin_locked(logger, config, reply_count, headless, already_count, remaining_count, sync_playwright):
+    """实际签到逻辑（在获取单实例锁后执行）"""
+    run_start_time = time.time()
+    stats = {
+        "target": reply_count, "success": 0, "failed": 0,
+        "unknown": 0, "skipped": 0, "ai_comments": 0,
+        "template_comments": 0, "quality_scores": [], "duration_s": 0,
+    }
     with sync_playwright() as p:
         browser, context = create_context(
             p, headless=headless, storage_state=str(PATHS["auth"])
@@ -1421,38 +2137,113 @@ def run_signin():
                 return
 
             success_count = already_count
-            replied_ids = get_today_replied_ids()
+            replied_ids = set(get_today_replied_ids())
+            replied_history = get_replied_history()
+            unknown_posts = get_unknown_posts()
             auth_expired = False
             for i, post in enumerate(posts):
                 if success_count >= reply_count:
                     break
 
+                # 帖子 ID 统一规范化
+                post_id = normalize_post_id(post["url"])
+
                 # 跳过今天已回复过的帖子（防止中断后重复回复）
-                post_id = re.search(r'/(\d+)\.html', post["url"])
-                post_id = post_id.group(1) if post_id else post["url"]
                 if post_id in replied_ids:
                     logger.info("跳过今天已回复的帖子: %s", post["title"])
                     continue
 
-                logger.info("--- 本次第 %d/%d 个帖子，总进度 %d/%d ---",
-                            i + 1, remaining_count, success_count, reply_count)
+                # 跳过30天内已回复过的帖子（防止跨天重复回复）
+                if post_id in replied_history:
+                    logger.info("跳过近期已回复的帖子: %s", post["title"])
+                    continue
+
+                logger.info("--- 扫描候选帖 %d，目标进度 %d/%d ---",
+                            i + 1, success_count, reply_count)
                 logger.info("标题: %s", post["title"])
 
-                result = reply_to_post(page, post["url"], config, logger)
+                # UNKNOWN 恢复：上次提交状态未知，先检查评论是否已存在
+                if post_id in unknown_posts:
+                    expected = unknown_posts[post_id].get("comment", "")
+                    logger.info("发现上次 UNKNOWN 记录，检查评论是否已存在")
+                    timeout = config.get("page_timeout_ms", 90000)
+                    goto_with_retry(page, post["url"], logger, timeout=timeout)
+                    page.wait_for_timeout(3000)
+                    verify_result = verify_existing_comment(page, expected, logger)
+                    if verify_result is True:
+                        logger.info("[POST %s] VERIFIED - 确认上次 UNKNOWN 评论已存在", post_id)
+                        success_count += 1
+                        stats["success"] += 1
+                        mark_today_progress(success_count, reply_count, post_id, result=True)
+                        record_post_execution(post_id, post["title"][:80], "VERIFIED",
+                                               comment=expected, verification="existing_comment")
+                        replied_ids.add(post_id)
+                        replied_history.add(post_id)
+                        unknown_posts.pop(post_id, None)
+                        if success_count < reply_count:
+                            mean = (config["min_delay"] + config["max_delay"]) / 2
+                            std = (config["max_delay"] - config["min_delay"]) / 4
+                            delay = max(config["min_delay"], min(config["max_delay"], int(random.gauss(mean, std))))
+                            logger.info("等待 %d 秒...", delay)
+                            time.sleep(delay)
+                        continue
+                    elif verify_result is False:
+                        logger.info("上次 UNKNOWN 评论确认不存在，跳过避免重复提交: %s", post["title"])
+                        stats["skipped"] += 1
+                        continue
+                    else:
+                        logger.info("上次 UNKNOWN 评论无法检测，跳过避免重复提交: %s", post["title"])
+                        stats["skipped"] += 1
+                        continue
+
+                result, reply_comment, meta = reply_to_post(page, post["url"], config, logger, post_id=post_id)
 
                 if result == "AUTH_EXPIRED":
                     logger.error("登录已过期，请重新运行 --login 配置登录后再次签到")
                     auth_expired = True
                     break
-                elif result:
+                elif result == "SUCCESS":
                     success_count += 1
+                    stats["success"] += 1
+                    if meta.get("comment_source") == "ai":
+                        stats["ai_comments"] += 1
+                    else:
+                        stats["template_comments"] += 1
+                    if meta.get("quality_score"):
+                        stats["quality_scores"].append(meta["quality_score"])
                     logger.info("回复成功 (%d/%d)", success_count, reply_count)
-                    mark_today_progress(success_count, reply_count, post_id)
+                    mark_today_progress(success_count, reply_count, post_id, result=True)
+                    replied_ids.add(post_id)
+                    replied_history.add(post_id)
+                    unknown_posts.pop(post_id, None)
                     if success_count < reply_count:
-                        delay = random.randint(config["min_delay"], config["max_delay"])
+                        # 正态分布延迟，比均匀随机更像真人行为
+                        mean = (config["min_delay"] + config["max_delay"]) / 2
+                        std = (config["max_delay"] - config["min_delay"]) / 4
+                        delay = max(config["min_delay"], min(config["max_delay"], int(random.gauss(mean, std))))
+                        logger.info("等待 %d 秒...", delay)
+                        time.sleep(delay)
+                elif result == "UNKNOWN":
+                    # 状态未知：记录但不计入成功，不重复提交
+                    stats["unknown"] += 1
+                    if meta.get("quality_score"):
+                        stats["quality_scores"].append(meta["quality_score"])
+                    logger.warning("回复状态未知，已记录待人工复核")
+                    mark_today_progress(success_count, reply_count, post_id, result=None, comment=reply_comment)
+                    unknown_posts[post_id] = {
+                        "comment": reply_comment or "",
+                        "status": "pending_review"
+                    }
+                    if success_count < reply_count:
+                        mean = (config["min_delay"] + config["max_delay"]) / 2
+                        std = (config["max_delay"] - config["min_delay"]) / 4
+                        delay = max(config["min_delay"], min(config["max_delay"], int(random.gauss(mean, std))))
                         logger.info("等待 %d 秒...", delay)
                         time.sleep(delay)
                 else:
+                    stats["failed"] += 1
+                    if meta.get("error") == "editor_not_found":
+                        stats["skipped"] += 1
                     logger.warning("回复失败，尝试下一个帖子")
                     # 检查页面是否崩溃，若崩溃则创建新页面
                     try:
@@ -1469,6 +2260,12 @@ def run_signin():
             logger.info("=" * 50)
             logger.info("签到完成！今天累计成功回复 %d/%d 个帖子", success_count, reply_count)
             logger.info("=" * 50)
+
+            # V3.2 生成每日报告
+            stats["duration_s"] = time.time() - run_start_time
+            stats["success"] = success_count
+            generate_daily_report(logger, stats)
+
             if success_count >= reply_count:
                 mark_done_today(success_count)
             else:
@@ -1548,7 +2345,10 @@ def show_test_comments():
         if comment == "SKIP":
             logger.info("结果: SKIP")
         else:
-            logger.info("评论: %s (%d字)", comment, char_count)
+            source = "AI" if config.get("deepseek_api_key") else "模板"
+            score, detail = score_comment_quality(comment, title, content)
+            logger.info("评论: %s (%d字) [%s]", comment, char_count, source)
+            logger.info("质量评分: %d/100 (%s)", score, detail)
         if config.get("deepseek_api_key") and i < len(test_posts) - 1:
             time.sleep(2)
     logger.info("-" * 40)
