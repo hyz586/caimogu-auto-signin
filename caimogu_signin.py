@@ -2188,9 +2188,8 @@ def _run_signin_locked(logger, config, reply_count, headless, already_count, rem
                             time.sleep(delay)
                         continue
                     elif verify_result is False:
-                        logger.info("上次 UNKNOWN 评论确认不存在，跳过避免重复提交: %s", post["title"])
-                        stats["skipped"] += 1
-                        continue
+                        logger.info("上次 UNKNOWN 评论确认不存在，尝试重新回复: %s", post["title"])
+                        unknown_posts.pop(post_id, None)
                     else:
                         logger.info("上次 UNKNOWN 评论无法检测，跳过避免重复提交: %s", post["title"])
                         stats["skipped"] += 1
@@ -2231,8 +2230,9 @@ def _run_signin_locked(logger, config, reply_count, headless, already_count, rem
                     logger.warning("回复状态未知，已记录待人工复核")
                     mark_today_progress(success_count, reply_count, post_id, result=None, comment=reply_comment)
                     unknown_posts[post_id] = {
+                        "date": date.today().isoformat(),
                         "comment": reply_comment or "",
-                        "status": "pending_review"
+                        "status": "pending_review",
                     }
                     if success_count < reply_count:
                         mean = (config["min_delay"] + config["max_delay"]) / 2
