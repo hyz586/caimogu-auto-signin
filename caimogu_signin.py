@@ -30,6 +30,8 @@ except ImportError:
 #  1. 路径与常量
 # ============================================================
 
+VERSION = "3.3.0"
+
 if getattr(sys, "frozen", False):
     SCRIPT_DIR = Path(sys.executable).parent.absolute()
 else:
@@ -176,13 +178,13 @@ _DEFAULT_DETAIL_PATTERNS = [
 
 _REPLY_TEMPLATES = {
     "help": [
-        "{d}这步最怕没提示，我之前也卡在这，最后靠回档才过去",
+        "{d}这步最怕没提示，官方给个说明能省不少事",
         "{d}看着像兼容性问题，等个补丁估计就好了，先别折腾",
-        "说到{d}，我遇到过一模一样的，清缓存没用，重装才解决",
+        "{d}这类问题八成得等补丁，清缓存重装可以试但别抱太大希望",
         "{d}要是能稳定复现就好办了，就怕随机触发排查到崩溃",
         "{d}这种问题最恶心，没报错没日志，只能盲猜",
         "我猜{d}是源头，楼主试试把这步跳过看会不会好",
-        "{d}这情况我熟，先别急着重装，试试点修复看看",
+        "{d}这情况先别急着重装，试试自带的修复功能",
         "{d}能每次都触发吗？如果随机出现的话大概率是内存泄漏",
     ],
     "regret": [
@@ -206,24 +208,24 @@ _REPLY_TEMPLATES = {
         "光看{d}描述还行，等实机出来再判断，现在说啥都早",
     ],
     "recommend": [
-        "{d}这个偏好挺明确，我玩过几个对口的，回头整理给你",
+        "{d}这个偏好挺明确，对口的作品其实不少，挑口碑稳的入",
         "按{d}这个方向找准没错，能少踩不少坑",
         "{d}要是再耐玩一点就好了，不然选择面确实窄",
         "说到{d}，我第一个想到的就是那几个老牌作品，稳",
         "{d}这个需求其实挺好满足的，就是看你想不想接受老画面",
         "{d}按这个标准筛的话选择面会窄不少，但质量有保障",
-        "{d}这个方向我还真玩过几个，主要看你能不能接受肝度",
+        "{d}这个方向的作品肝度普遍不低，主要看你时间够不够",
         "单看{d}这个要求，能排掉一大批了，剩下的都还行",
     ],
     "luck": [
-        "{d}这运气没谁了，我抽了八十发才出，人比人气死人",
-        "看到{d}这种结果默默关掉了游戏，差距太大了",
-        "{d}这波属实离谱，我十连全是保底，太酸了",
-        "这种{d}截图最容易劝人手痒，下次我也想试试",
+        "{d}这运气没谁了，人比人气死人，非酋看了直接自闭",
+        "看到{d}这种结果只能说差距太大，没法比",
+        "{d}这波属实离谱，非酋看了只有酸的份",
+        "这种{d}截图最容易劝人手痒，看着就想去抽一发",
         "{d}比玄学还刺激，差一点就反转了，运气这东西真没道理",
-        "看到{d}我突然不想玩这游戏了，非酋不配拥有快乐",
+        "看到{d}瞬间理解什么叫非酋不配拥有快乐",
         "{d}这波操作妥妥的欧皇附体，建议去买彩票",
-        "单看{d}就知道这运气逆天，我连续保底三个月了都",
+        "单看{d}就知道这运气逆天，保底玩家的心在滴血",
     ],
     "media": [
         "{d}这块改编好了是神作，改砸了就是灾难，风险太大",
@@ -260,10 +262,68 @@ _REPLY_TEMPLATES = {
         "说实话{d}这方向挺有意思的，之前没往这方面想过",
         "{d}如果能落地的话影响会很明显，先观望吧",
         "我比较担心{d}会不会有隐藏问题，等实测再说",
-        "{d}这个角度挺新颖的，细想的话确实值得关注",
+        "{d}这个切入点挺新颖的，细想确实值得琢磨",
         "看到{d}我觉得可以期待一下，就怕最后虎头蛇尾",
         "{d}细想的话影响挺深远的，不只是表面上那么简单",
-        "说到{d}我也有同感，这确实是个容易被忽略的点",
+        "说到{d}，这确实是个容易被忽略的点，平时很少人提",
+    ],
+}
+
+# 无细节通用模板：提取不到可靠细节时兜底，避免"专有名词+生硬拼接"（V3.3-gamma）
+_REPLY_TEMPLATES_GENERIC = {
+    "help": [
+        "这问题八成出在兼容性上，等官方补丁比瞎折腾强",
+        "没报错没日志最难排查，只能一步步排除硬件软件了",
+        "先试试验证文件完整性，还不行就只能等补丁了",
+        "这种随机触发的bug最烦，复现都难，官方修起来也慢",
+    ],
+    "regret": [
+        "等了这么久就这结局，前面的期待基本白费了",
+        "消息一点缓冲都没有，太突然了，可惜了",
+        "又是好项目没了，最近这种事见得太多了",
+        "这收场方式真让人不想再关注新企划了",
+    ],
+    "update": [
+        "光看更新描述判断不了啥，等实机表现再说",
+        "每次更新都说大改，就怕实装缩水一半",
+        "方向听着是对的，执行力度才是关键，先观望",
+        "更新内容是好，就怕优化跟不上白搭",
+    ],
+    "recommend": [
+        "这类型口碑稳的作品不少，主要看你能接受什么画风",
+        "按这个需求筛，选择面不宽但质量都有保障",
+        "老作品先入坑最稳，踩坑概率小很多",
+        "别只盯着新作，有些老作品现在看依然能打",
+    ],
+    "luck": [
+        "这运气真没谁了，非酋看了得直接自闭",
+        "运气这东西真没道理，羡慕都羡慕不来",
+        "差一点就反转了，这波刺激程度堪比买彩票",
+        "欧皇附体建议直接去买彩票，非酋只有酸的份",
+    ],
+    "media": [
+        "改编好了是神作改砸是灾难，风险真不小",
+        "选角比剧情更决定成败，别只靠阵容堆噱头",
+        "原著粉肯定会盯着改编细节不放，压力真大",
+        "最怕为了大众化把核心设定改得面目全非",
+    ],
+    "rumor": [
+        "爆料先让子弹飞一会，等实锤再激动也不迟",
+        "这种消息来源模糊的，看看就好别太当真",
+        "之前翻车的爆料还少吗，先持观望态度稳一点",
+        "要是真的影响确实大，但我赌大概率是误传",
+    ],
+    "sales": [
+        "这成绩放同类里算能打的，说明玩家反馈确实好",
+        "销量起来了后续能不能保持才是关键",
+        "玩家用脚投票最实在，质量说话比营销管用",
+        "首周数据亮眼不稀奇，长线运营才是真考验",
+    ],
+    "normal": [
+        "先观望吧，等信息多一点再下判断也不迟",
+        "方向看着是不错，就怕最后又虎头蛇尾",
+        "细节处理好了体验会好不少，等实测再说",
+        "这事的影响比表面看起来大，值得留意后续",
     ],
 }
 
@@ -355,15 +415,15 @@ class SingleInstanceLock:
 # ============================================================
 
 def setup_logging():
-    """配置日志（同时输出到文件和控制台），按天轮转保留7天"""
-    from logging.handlers import TimedRotatingFileHandler
+    """配置日志（同时输出到文件和控制台），按大小轮转"""
+    from logging.handlers import RotatingFileHandler
     logger = logging.getLogger("caimogu")
     logger.setLevel(logging.INFO)
     if logger.handlers:
         return logger
     fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-    fh = TimedRotatingFileHandler(
-        str(PATHS["log"]), when='midnight', backupCount=7, encoding='utf-8'
+    fh = RotatingFileHandler(
+        str(PATHS["log"]), maxBytes=1024*1024, backupCount=1, encoding='utf-8'
     )
     fh.setLevel(logging.INFO)
     fh.setFormatter(fmt)
@@ -426,10 +486,14 @@ def get_today_reply_count():
 
 
 def get_today_replied_ids():
-    """获取今天已回复的帖子ID列表，防止中断后重复回复"""
+    """获取今天已回复的帖子ID列表，防止中断后重复回复
+
+    以 today_post_ids_date 为准（V3.2.2 及更早版本无此字段，
+    遗留的 today_post_ids 可能堆积历史 ID，此时按空处理）
+    """
     data = load_json(PATHS["replied"], {})
     today = date.today().isoformat()
-    if data.get("last_run_date") == today:
+    if data.get("last_run_date") == today and data.get("today_post_ids_date") == today:
         return data.get("today_post_ids", [])
     return []
 
@@ -482,8 +546,8 @@ def get_unknown_posts():
 def mark_today_progress(post_count, reply_count, post_id=None, result=None, comment=None):
     """记录进度，避免中断后重复回复；同时保存帖子ID和历史记录
 
-    result: True=成功(记入history并清理UNKNOWN), None=未知状态(记入unknown_posts)
-    comment: 评论内容（仅UNKNOWN状态时记录）
+    result: True=成功(记入history)；其他值不写帖子级数据（挂起记录由 mark_pending_verify 负责）
+    comment: 保留参数兼容旧调用，V3.3 起不再在此写 unknown_posts
     """
     data = load_json(PATHS["replied"], {})
     today = date.today().isoformat()
@@ -491,6 +555,11 @@ def mark_today_progress(post_count, reply_count, post_id=None, result=None, comm
     data["last_run_posts"] = post_count
     data["last_run_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     data["status"] = "running" if post_count < reply_count else "done"
+
+    # 进入新的一天时清空历史遗留的 today_post_ids（修复堆积 bug）
+    if data.get("today_post_ids_date") != today:
+        data["today_post_ids"] = []
+        data["today_post_ids_date"] = today
 
     if post_id:
         # 处理成功状态
@@ -508,22 +577,51 @@ def mark_today_progress(post_count, reply_count, post_id=None, result=None, comm
             history = {pid: dt for pid, dt in history.items() if dt >= cutoff}
             data["replied_history"] = history
 
-            # 成功后清理该帖的 UNKNOWN 记录
+            # 成功后清理该帖的挂起记录
             unknown = data.get("unknown_posts", {})
             unknown.pop(post_id, None)
             data["unknown_posts"] = unknown
 
-        # 处理未知状态：记录待人工复核
-        elif result is None and comment:
-            unknown = data.get("unknown_posts", {})
-            unknown[post_id] = {
-                "date": today,
-                "comment": comment,
-                "status": "pending_review"
-            }
-            data["unknown_posts"] = unknown
-
     save_json(PATHS["replied"], data)
+
+
+def mark_pending_verify(post_id, post_url, title, comment, reason, attempts=1,
+                        previous_status=None):
+    """记录待验证帖子：已执行过提交但无法确认结果，下次运行优先验证
+
+    沿用 unknown_posts 字段存储（不迁移数据结构），status=pending_verify
+    与旧版 pending_review 记录兼容共存，恢复时都走验证流程。
+    reason: "timeout"=验证超时 / "auth_expired"=提交后登录失效
+    """
+    data = load_json(PATHS["replied"], {})
+    pending = data.get("unknown_posts", {})
+    entry = {
+        "date": date.today().isoformat(),
+        "url": post_url,
+        "title": (title or "")[:80],
+        "comment": comment or "",
+        "status": "pending_verify",
+        "reason": reason,
+        "attempts": attempts,
+    }
+    if previous_status:
+        entry["previous_status"] = previous_status
+    pending[post_id] = entry
+    data["unknown_posts"] = pending
+    save_json(PATHS["replied"], data)
+    return entry
+
+
+def pending_origin_status(entry):
+    """从挂起记录推导其来源事件状态，用于恢复记录的 previous_status"""
+    if not entry:
+        return None
+    prev = entry.get("previous_status")
+    if prev:
+        return prev
+    if entry.get("reason") == "auth_expired":
+        return "AUTH_EXPIRED"
+    return "UNKNOWN"
 
 
 def mark_done_today(post_count):
@@ -718,6 +816,55 @@ def _normalize_generated_comment(text):
     return text
 
 
+# 残句悬空收尾：这些连接词/时间状语出现在句尾时，说明话没说完（V3.3-gamma）
+_INCOMPLETE_ENDINGS = (
+    "如果", "所以", "但是", "不过", "而且", "并且", "然后", "毕竟",
+    "万一", "要是", "的话", "来看", "来说", "至于", "比如", "例如",
+    "还有", "以及", "或者", "甚至", "尤其", "反而", "另外", "就是",
+    "搞得", "弄得", "变得", "变成", "还得", "只能", "得看", "要看",
+    "就算", "哪怕", "虽然", "还是", "到时候", "关键是", "问题是",
+    "再加上", "最重要的是",
+)
+
+
+def _has_incomplete_ending(comment):
+    """检测以连接词/悬空成分收尾的残句，如"现在画饼也太早了吧，到时候"（V3.3-gamma）"""
+    comment = _normalize_generated_comment(comment)
+    if not comment:
+        return False
+    if any(comment.endswith(d) for d in _INCOMPLETE_ENDINGS):
+        return True
+    # 动词悬空："挺/真/好/还/都/只/很 + 希望"收尾（名词用法如"别抱太大希望"不受影响）
+    if re.search(r'[挺真好还都只很]希望$', comment):
+        return True
+    return False
+
+
+# 细节首尾不允许出现的虚词/连词字符
+_DETAIL_EDGE_PARTICLES_LEAD = "的了和与及跟或把"
+_DETAIL_EDGE_PARTICLES_TAIL = "的了和与及跟或是在就还很都"
+
+
+def is_detail_usable(detail):
+    """判断提取到的细节是否可靠可用（V3.3-gamma）
+
+    不可用：为空、过短/过长、纯字母数字（如 XSX/PLAT/2027）、
+    无连续中文、首尾是虚词、含指代词。不可用时模板不硬塞该细节。
+    """
+    if not detail:
+        return False
+    detail = str(detail).strip()
+    if not (2 <= _meaningful_text_len(detail) <= 12):
+        return False
+    if not re.search(r'[\u4e00-\u9fa5]{2}', detail):
+        return False
+    if detail[0] in _DETAIL_EDGE_PARTICLES_LEAD or detail[-1] in _DETAIL_EDGE_PARTICLES_TAIL:
+        return False
+    if any(word in detail for word in ("这个", "那个", "什么")):
+        return False
+    return True
+
+
 def _is_reply_valid(comment, title="", content=""):
     """检查回复是否符合规则"""
     comment = _normalize_generated_comment(comment)
@@ -729,8 +876,12 @@ def _is_reply_valid(comment, title="", content=""):
     # 弱检测词：仅在开头出现时过滤，避免误杀正文正常提及
     if any(comment.startswith(prefix) for prefix in _WEAK_BANNED_PREFIXES):
         return False
+    # 残句：连接词收尾说明话没说完
+    if _has_incomplete_ending(comment):
+        return False
+    # 长度：15~55（V3.3-gamma 从 15~40 放宽，避免误杀 40+ 字的优质评论）
     length = _comment_len(comment)
-    if not (15 <= length <= 40):
+    if not (15 <= length <= 55):
         return False
     compact_title = re.sub(r'\s+', '', title or "")
     if compact_title and comment == compact_title:
@@ -749,28 +900,37 @@ def _apply_synonyms(text):
 
 
 def generate_comment_template(title, content=""):
-    """模板模式：先判断 REPLY/SKIP，再生成短回复"""
+    """模板模式：先判断 REPLY/SKIP，再生成短回复
+
+    V3.3-gamma：细节不可靠时改用无细节通用模板，不硬塞；
+    模板已去除虚构个人经历，改为"具体对象+回应角度+观点"结构。
+    """
     decision = judge_replyability(title, content)
     if decision == "SKIP":
         return "SKIP"
 
-    detail = _extract_detail(title, content)
-    if not detail:
-        return "SKIP"
-
     title_type = detect_title_type((title or "") + " " + (content or "")[:120])
-    templates = _REPLY_TEMPLATES.get(title_type, _REPLY_TEMPLATES["normal"])
+    detail = _extract_detail(title, content)
 
-    # 打乱模板顺序，填充插槽并应用同义词随机化
-    candidates = []
-    for tpl in random.sample(templates, len(templates)):
-        filled = tpl.replace("{d}", detail)
-        filled = _apply_synonyms(filled)
-        candidates.append(filled)
+    if is_detail_usable(detail):
+        templates = _REPLY_TEMPLATES.get(title_type, _REPLY_TEMPLATES["normal"])
 
-    valid = [c for c in candidates if _is_reply_valid(c, title, content)]
-    if valid:
-        return random.choice(valid)
+        # 打乱模板顺序，填充插槽并应用同义词随机化
+        candidates = []
+        for tpl in random.sample(templates, len(templates)):
+            filled = tpl.replace("{d}", detail)
+            filled = _apply_synonyms(filled)
+            candidates.append(filled)
+
+        valid = [c for c in candidates if _is_reply_valid(c, title, content)]
+        if valid:
+            return random.choice(valid)
+
+    # 细节不可用或细节模板全部无效：用无细节通用模板兜底，避免生硬拼接
+    generic = _REPLY_TEMPLATES_GENERIC.get(title_type, _REPLY_TEMPLATES_GENERIC["normal"])
+    generic_valid = [c for c in generic if _is_reply_valid(c, title, content)]
+    if generic_valid:
+        return random.choice(generic_valid)
     return "SKIP"
 
 
@@ -804,8 +964,51 @@ def _call_deepseek_api(url, headers, data, logger, max_retries=3):
             raise
 
 
+FALLBACK_REASONS = (
+    "empty_response",    # AI 两次返回空/过短
+    "429",               # API 限流（重试后仍失败）
+    "http_error",        # 其他 HTTP 错误（401/5xx 等）
+    "network_error",     # 连接失败/超时
+    "banned_phrase",     # AI 输出含套话
+    "invalid_length",    # 长度不在 15~55
+    "incomplete_ending", # 以连接词收尾的残句（V3.3-gamma）
+    "invalid_format",    # 开头套话/复述标题等格式问题
+    "exception",         # 其他异常
+)
+
+
+def _classify_api_exception(e):
+    """将 AI 请求异常归类为 fallback_reason"""
+    import requests
+    if isinstance(e, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)):
+        return "network_error"
+    if isinstance(e, requests.exceptions.HTTPError):
+        status = e.response.status_code if e.response is not None else 0
+        return "429" if status == 429 else "http_error"
+    return "exception"
+
+
+def _template_fallback_result(title, content, reason, ai_attempts):
+    """AI 失败后回退模板，生成结构化结果"""
+    return {
+        "comment": generate_comment_template(title, content),
+        "source": "template_fallback",
+        "ai_attempts": ai_attempts,
+        "fallback": True,
+        "fallback_reason": reason,
+    }
+
+
 def generate_comment_ai(title, content, api_key, base_url, model):
-    """AI 模式：让 AI 直接生成评论或 SKIP，含空返回重试和指数退避"""
+    """AI 模式：让 AI 直接生成评论或 SKIP，含空返回重试和指数退避
+
+    V3.3-beta 起返回结构化 dict：
+      comment: 评论文本（或 "SKIP"）
+      source: "ai"=首次直接成功 / "ai_retry"=重试后成功 / "template_fallback"=回退模板
+      ai_attempts: AI 生成尝试次数（1=首次，2=缩短输入重试后）
+      fallback: 是否最终使用了模板
+      fallback_reason: 空串，或 FALLBACK_REASONS 之一
+    """
     logger = logging.getLogger("caimogu")
     try:
         base_url = (base_url or "https://api.deepseek.com/v1").rstrip("/")
@@ -828,9 +1031,10 @@ def generate_comment_ai(title, content, api_key, base_url, model):
             "- 从玩家立场出发回复，表达个人态度（担忧、期待、吐槽、对比、怀疑），不要像在评价新闻\n"
             "- 抓住帖子里一个具体细节来回复，可以推测影响、表达预期\n"
             "- 语气口语化，像真人在闲聊，可以吐槽、提问、补充\n"
-            "- 15到40个字，别太短也别太长\n"
+            "- 15到55个字，18到50个字之间最好\n"
+            "- 必须是完整的一句话，把观点说完，不要说一半就停，尤其不要以\"到时候\"\"如果\"\"所以\"这类词收尾\n"
             "- 绝对不要用这些套话：感谢分享、支持一下、学到了、坐等后续、确实如此、期待更新、前排围观、有道理、这波可以、说得好、支持楼主、码住、马克\n"
-            "- 不要假装亲身经历过\n"
+            "- 不要编造个人经历（抽卡记录、游戏时长、踩过的坑），没有依据就不要写\n"
             "- 不要总结帖子内容或复述标题\n"
             "- 不要用\"这个细节\"\"这个改动\"\"这个消息\"开头\n\n"
             "如果帖子内容太少、没法自然接话，只回复两个字母：SKIP\n"
@@ -848,13 +1052,15 @@ def generate_comment_ai(title, content, api_key, base_url, model):
 
         logger.info("AI 请求: base_url=%s, model=%s", base_url, model)
         raw_content, _ = _call_deepseek_api(url, headers, data, logger)
+        ai_attempts = 1
 
         logger.info("AI 原始返回: %s", raw_content)
         comment = _normalize_generated_comment(raw_content)
         logger.info("AI 清洗后: %s (字数=%d)", comment, _comment_len(comment))
 
         if comment.upper() == "SKIP":
-            return "SKIP"
+            return {"comment": "SKIP", "source": "ai", "ai_attempts": ai_attempts,
+                    "fallback": False, "fallback_reason": ""}
 
         if _comment_len(comment) < 5:
             logger.warning("AI 返回空或太短，缩短输入后重试一次")
@@ -869,41 +1075,61 @@ def generate_comment_ai(title, content, api_key, base_url, model):
             }
             time.sleep(1)
             raw_content2, _ = _call_deepseek_api(url, headers, retry_data, logger)
+            ai_attempts = 2
             logger.info("AI 重试返回: %s", raw_content2)
             comment = _normalize_generated_comment(raw_content2)
             logger.info("AI 重试清洗后: %s (字数=%d)", comment, _comment_len(comment))
 
             if comment.upper() == "SKIP":
-                return "SKIP"
+                return {"comment": "SKIP", "source": "ai", "ai_attempts": ai_attempts,
+                        "fallback": False, "fallback_reason": ""}
             if _comment_len(comment) < 5:
                 logger.warning("AI 重试仍为空，回退模板")
-                return generate_comment_template(title, content)
+                return _template_fallback_result(title, content, "empty_response", ai_attempts)
 
         if any(part in comment for part in _HARD_BANNED_PARTS):
             logger.warning("AI 回复含套话，回退模板: %s", comment)
-            return generate_comment_template(title, content)
+            return _template_fallback_result(title, content, "banned_phrase", ai_attempts)
 
         # AI 输出必须经过与模板模式相同的本地规则校验。
         if not _is_reply_valid(comment, title, content):
             logger.warning(
                 "AI 回复未通过本地规则校验，回退模板: %s", comment
             )
-            return generate_comment_template(title, content)
+            if _has_incomplete_ending(comment):
+                reason = "incomplete_ending"
+            elif not (15 <= _comment_len(comment) <= 55):
+                reason = "invalid_length"
+            else:
+                reason = "invalid_format"
+            return _template_fallback_result(title, content, reason, ai_attempts)
 
-        return comment
+        return {"comment": comment,
+                "source": "ai" if ai_attempts == 1 else "ai_retry",
+                "ai_attempts": ai_attempts, "fallback": False, "fallback_reason": ""}
     except Exception as e:
-        logging.getLogger("caimogu").warning("AI生成评论失败，回退到模板模式: %s", e)
-        return generate_comment_template(title, content)
+        reason = _classify_api_exception(e)
+        logging.getLogger("caimogu").warning("AI生成评论失败(%s)，回退到模板模式: %s", reason, e)
+        return _template_fallback_result(title, content, reason, 1)
 
 
 def generate_comment(title, content, config):
-    """根据配置选择 AI 模式或模板模式生成评论；可能返回 SKIP"""
+    """根据配置选择 AI 模式或模板模式生成评论；返回结构化 dict（V3.3-beta）
+
+    dict 字段见 generate_comment_ai；未配置 API Key 时 source="template", ai_attempts=0
+    """
     api_key = config.get("deepseek_api_key", "")
     if api_key:
         base_url = config.get("deepseek_base_url", "https://api.deepseek.com/v1")
         model = config.get("deepseek_model", "deepseek-chat")
         return generate_comment_ai(title, content, api_key, base_url, model)
-    return generate_comment_template(title, content)
+    return {
+        "comment": generate_comment_template(title, content),
+        "source": "template",
+        "ai_attempts": 0,
+        "fallback": False,
+        "fallback_reason": "",
+    }
 
 
 # ============================================================
@@ -918,38 +1144,85 @@ POST_STATUS = (
     "SUBMITTED",    # 已点击提交
     "SUCCESS",      # 确认成功
     "FAILED",       # 确认失败
-    "UNKNOWN",      # 状态未知
-    "VERIFIED",     # UNKNOWN 经验证确认为成功
-    "EXPIRED",      # UNKNOWN 超过3天过期
-    "AUTH_EXPIRED", # 登录失效
+    "PENDING_VERIFY",   # 已提交但无法确认结果（登录失效/页面异常），下次运行优先验证
+    "UNKNOWN",      # 验证超时、结果不明确
+    "VERIFIED",     # PENDING_VERIFY/UNKNOWN 经验证确认为成功
+    "EXPIRED",      # 挂起超过3天过期
+    "AUTH_EXPIRED", # 登录失效（提交后发现的，会转入 PENDING_VERIFY）
 )
 
-# 质量评分权重（V3.2.2 语义结构评分）
+# 质量评分权重（V3.3-final 校准：拆 length_repeat → completeness + length，
+# 降权复述型维度，升权自然度并真扣分）
 _SCORE_WEIGHTS = {
-    "relevance": 30,    # 相关性：评论是否回应了帖子主题
+    "relevance": 20,    # 相关性：评论是否回应了帖子主题（降权：复述帖子词不应主导总分）
     "specificity": 25,  # 具体性：是否引用了帖子中的具体细节
-    "type_match": 20,   # 类型匹配：与帖子类型是否吻合
-    "naturalness": 15,  # 自然度：不含套话、不像模板
-    "length_repeat": 10, # 长度合适且与历史重复度低
+    "type_match": 10,   # 类型匹配：与帖子类型是否吻合（降权：关键词表较粗糙）
+    "completeness": 15, # 完整性：完整成句、非残句/截断句（V3.3-final 新增）
+    "naturalness": 20,  # 自然度：不含套话、不像模板、无虚构经历（升权并真扣分）
+    "length": 10,       # 长度合适（从 length_repeat 拆出；重复检测已独立为提交前拒绝）
 }
+
+# 虚构个人经历标记（V3.3-final：AI/模板编造的亲身经历）
+_FICTION_MARKERS = [
+    "我抽了", "我抽过", "我十连", "我连续保底", "我保底",
+    "我玩过", "我遇到过", "我之前也", "我卡在", "我买了", "我肝了",
+]
+
+
+def _matches_own_template(comment):
+    """判断评论是否与自家模板高度相似（V3.3-final）
+
+    模板按 {d} 插槽切段，任一 >=5 字的模板片段（去标点）出现在评论中即视为模板腔。
+    """
+    comment = _normalize_generated_comment(comment)
+    if not comment:
+        return False
+    comment = re.sub(r'[^\u4e00-\u9fa5A-Za-z0-9]', '', comment)
+    for group in (_REPLY_TEMPLATES, _REPLY_TEMPLATES_GENERIC):
+        for templates in group.values():
+            for tpl in templates:
+                for segment in tpl.split("{d}"):
+                    seg = re.sub(r'[^\u4e00-\u9fa5A-Za-z0-9]', '', segment)
+                    if len(seg) >= 5 and seg in comment:
+                        return True
+    return False
+
+
+def _naturalness_deductions(comment):
+    """自然度扣分明细（V3.3-final：真扣分），返回 [(原因, 扣分)]"""
+    comment = _normalize_generated_comment(comment)
+    deductions = []
+    if any(part in comment for part in _HARD_BANNED_PARTS):
+        return [("hard_banned", _SCORE_WEIGHTS["naturalness"])]
+    if any(comment.startswith(prefix) for prefix in _WEAK_BANNED_PREFIXES):
+        deductions.append(("template_opening", 5))
+    if any(marker in comment for marker in _FICTION_MARKERS):
+        deductions.append(("fiction", 8))
+    if re.match(r'^(这个|那个)(细节|改动|消息|点|设定|方向)', comment):
+        deductions.append(("stiff_detail_prefix", 4))
+    if _matches_own_template(comment):
+        deductions.append(("own_template", 10))
+    return deductions
 
 
 def score_comment_quality(comment, title, content):
-    """评估评论质量（V3.2.2 语义结构评分），返回 0-100 分及各维度得分明细
+    """评估评论质量（V3.3-final 校准版），返回 0-100 分及各维度得分明细
 
     评分维度：
-    - relevance (30): 评论与帖子主题的字符 n-gram 重叠度
+    - relevance (20): 评论与帖子主题的字符 2-gram 重叠度（降权，避免复述主导）
     - specificity (25): 是否引用了帖子中的具体细节
-    - type_match (20): 与帖子类型是否吻合
-    - naturalness (15): 不含套话、不像模板
-    - length_repeat (10): 长度合适且与历史重复度低（默认满分，相似则扣分）
+    - type_match (10): 与帖子类型是否吻合
+    - completeness (15): 完整成句；残句/逗号收尾的截断句得 0 分
+    - naturalness (20): 基础分扣减——模板开头 -5、虚构经历 -8、生硬前缀 -4、自家模板腔 -10
+    - length (10): 长度在 15~55
     """
     scores = {}
+    raw = comment or ""
     comment_clean = _normalize_generated_comment(comment)
     if not comment_clean or comment_clean.upper() == "SKIP":
         return 0, {}
 
-    # 1. 相关性（30）：评论与帖子主题的字符 2-gram 重叠度
+    # 1. 相关性（20）：评论与帖子主题的字符 2-gram 重叠度
     title_chars = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9]', '', title or "")
     content_chars = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9]', '', content or "")[:200]
     post_text = title_chars + content_chars
@@ -965,6 +1238,9 @@ def score_comment_quality(comment, title, content):
                 scores["relevance"] = _SCORE_WEIGHTS["relevance"] * 2 // 3
             elif overlap >= 0.05:
                 scores["relevance"] = _SCORE_WEIGHTS["relevance"] // 3
+            else:
+                # 基础分：评论已通过可回复性判断且针对该帖生成，不归零
+                scores["relevance"] = 3
 
     # 2. 具体性（25）：是否引用了帖子中的具体细节
     detail = _extract_detail(title, content) or ""
@@ -994,19 +1270,26 @@ def score_comment_quality(comment, title, content):
     if any(w in comment_clean for w in type_words):
         scores["type_match"] = _SCORE_WEIGHTS["type_match"]
 
-    # 4. 自然度（15）：不含套话、不像模板
-    if not any(part in comment_clean for part in _HARD_BANNED_PARTS):
-        if not any(comment_clean.startswith(prefix) for prefix in _WEAK_BANNED_PREFIXES):
-            scores["naturalness"] = _SCORE_WEIGHTS["naturalness"]
-        else:
-            scores["naturalness"] = _SCORE_WEIGHTS["naturalness"] // 2
+    # 4. 完整性（15，V3.3-final）：残句/截断句得 0 分
+    stripped_raw = (raw or "").rstrip()
+    truncated_by_punct = stripped_raw.endswith(("，", ",", "、", "：", ":"))
+    if _has_incomplete_ending(comment_clean) or truncated_by_punct:
+        scores["completeness"] = 0
+    else:
+        scores["completeness"] = _SCORE_WEIGHTS["completeness"]
 
-    # 5. 长度合适 + 重复度低（10）：默认满分，相似则扣分
+    # 5. 自然度（20，V3.3-final 真扣分）
+    naturalness = _SCORE_WEIGHTS["naturalness"]
+    for _reason, deduction in _naturalness_deductions(comment_clean):
+        naturalness -= deduction
+    scores["naturalness"] = max(0, naturalness)
+
+    # 6. 长度（10，V3.3-final 从 length_repeat 拆出；重复检测独立为提交前拒绝）
     clen = _comment_len(comment_clean)
-    if 15 <= clen <= 40:
-        scores["length_repeat"] = _SCORE_WEIGHTS["length_repeat"]
-    elif 10 <= clen <= 50:
-        scores["length_repeat"] = _SCORE_WEIGHTS["length_repeat"] // 2
+    if 15 <= clen <= 55:
+        scores["length"] = _SCORE_WEIGHTS["length"]
+    elif 10 <= clen <= 60:
+        scores["length"] = _SCORE_WEIGHTS["length"] // 2
 
     total = sum(scores.values())
     return total, scores
@@ -1060,8 +1343,16 @@ def is_comment_too_similar(comment, recent_comments, threshold=0.6):
 
 def record_post_execution(post_id, title, status, comment=None, comment_source=None,
                            attempts=1, duration_ms=0, verification=None, error=None,
-                           quality_score=None):
-    """记录单个帖子的完整执行结果到 replied_posts.json"""
+                           quality_score=None, previous_status=None,
+                           ai_attempts=0, fallback_reason=None):
+    """记录单个帖子的完整执行结果到 replied_posts.json
+
+    attempts: 该帖子第几次被处理（恢复记录为 2、3...）
+    previous_status: 恢复场景下来源状态（如 AUTH_EXPIRED），用于区分"恢复"与"独立任务"
+    ai_attempts: AI 生成尝试次数（V3.3-beta，仅 AI 参与时记录）
+    fallback_reason: 模板回退原因（V3.3-beta，仅发生回退时记录）
+    verification: 提交结果的验证方式（comment_count_increase/comment_text_found 等）
+    """
     data = load_json(PATHS["replied"], {})
     records = data.get("post_records", [])
     entry = {
@@ -1077,6 +1368,12 @@ def record_post_execution(post_id, title, status, comment=None, comment_source=N
         "verification": verification or "",
         "error": error,
     }
+    if previous_status:
+        entry["previous_status"] = previous_status
+    if ai_attempts:
+        entry["ai_attempts"] = ai_attempts
+    if fallback_reason:
+        entry["fallback_reason"] = fallback_reason
     if quality_score is not None:
         entry["quality_score"] = quality_score
     records.append(entry)
@@ -1088,7 +1385,7 @@ def record_post_execution(post_id, title, status, comment=None, comment_source=N
 
 
 def generate_daily_report(logger, stats):
-    """生成并输出每日签到报告"""
+    """生成并输出每日签到报告（V3.3-beta：评论来源细分 + fallback 原因分布）"""
     report_lines = [
         "=" * 50,
         "采蘑菇签到报告",
@@ -1098,9 +1395,15 @@ def generate_daily_report(logger, stats):
         f"失败：{stats.get('failed', 0)}   "
         f"UNKNOWN：{stats.get('unknown', 0)}   "
         f"SKIP：{stats.get('skipped', 0)}",
-        f"AI评论：{stats.get('ai_comments', 0)}   "
-        f"模板评论：{stats.get('template_comments', 0)}",
+        f"AI成功：{stats.get('ai_comments', 0)}   "
+        f"AI重试后成功：{stats.get('ai_retry_comments', 0)}",
+        f"模板直接：{stats.get('template_comments', 0)}   "
+        f"模板fallback：{stats.get('template_fallback_comments', 0)}",
     ]
+    fallback_reasons = stats.get("fallback_reasons", {})
+    if fallback_reasons:
+        report_lines.append("fallback原因：" + "  ".join(
+            f"{k}：{v}" for k, v in sorted(fallback_reasons.items())))
     quality_scores = stats.get("quality_scores", [])
     if quality_scores:
         avg_q = sum(quality_scores) / len(quality_scores)
@@ -1529,10 +1832,12 @@ def get_comment_count(page, logger):
 def wait_reply_result(page, logger, previous_editor_text, initial_comments=None, post_id=None):
     """
     提交后判断结果：
-      True  = 明确成功
-      False = 明确失败
-      None  = 状态未知，不重复提交
+      (True, method)   = 明确成功
+      (False, "")      = 明确失败
+      (None, "")       = 状态未知，不重复提交
 
+    method: 验证方式（comment_count_increase/success_toast/comment_text_found/
+            page_text_found/reload_comment_text/reload_page_text）
     initial_comments: 提交前的评论数（由 reply_to_post 在提交前获取并传入）
     """
     success_words = ("成功", "发表成功", "回复成功", "发布成功", "评论成功")
@@ -1549,23 +1854,23 @@ def wait_reply_result(page, logger, previous_editor_text, initial_comments=None,
         if initial_comments is not None and current_comments is not None:
             if current_comments > initial_comments:
                 logger.info("评论数从 %d 增加到 %d，确认提交成功", initial_comments, current_comments)
-                return True
+                return True, "comment_count_increase"
 
         # 2. 检查明确成功提示
         msg = get_visible_success_message(page)
         if msg:
             logger.info("检测到提交提示: %s", msg)
             if any(word in msg for word in success_words):
-                return True
+                return True, "success_toast"
             if any(word in msg for word in error_words):
-                return False
+                return False, ""
 
         # 3. 检查明确错误提示
         err = get_visible_error_message(page)
         if err:
             logger.warning("检测到提交错误提示: %s", err)
             if any(word in err for word in error_words):
-                return False
+                return False, ""
 
         # 4. 编辑器清空后，继续等待；同时尝试文本匹配确认成功
         current = get_reply_editor_text(page)
@@ -1576,7 +1881,7 @@ def wait_reply_result(page, logger, previous_editor_text, initial_comments=None,
                 verify_result = verify_existing_comment(page, previous_editor_text, logger)
                 if verify_result is True:
                     logger.info("在评论区域找到已提交的评论文本，确认提交成功")
-                    return True
+                    return True, "comment_text_found"
                 # fallback：评论选择器没找到，但全页面可能包含
                 try:
                     text_found = page.evaluate(
@@ -1585,7 +1890,7 @@ def wait_reply_result(page, logger, previous_editor_text, initial_comments=None,
                     )
                     if text_found:
                         logger.info("在页面中找到已提交的评论文本，确认提交成功")
-                        return True
+                        return True, "page_text_found"
                 except Exception:
                     pass
 
@@ -1598,7 +1903,7 @@ def wait_reply_result(page, logger, previous_editor_text, initial_comments=None,
             verify_result = verify_existing_comment(page, previous_editor_text, logger)
             if verify_result is True:
                 logger.info("刷新后在评论区域找到评论文本，确认提交成功")
-                return True
+                return True, "reload_comment_text"
             # fallback：全页面搜索
             text_found = page.evaluate(
                 '(expected) => document.body.innerText.includes(expected)',
@@ -1606,12 +1911,12 @@ def wait_reply_result(page, logger, previous_editor_text, initial_comments=None,
             )
             if text_found:
                 logger.info("刷新后在页面中找到评论文本，确认提交成功")
-                return True
+                return True, "reload_page_text"
         except Exception as e:
             logger.warning("刷新页面验证失败: %s", e)
 
     logger.warning("提交结果无法明确确认，标记为未知状态")
-    return None
+    return None, ""
 
 
 def submit_reply(page, logger):
@@ -1728,17 +2033,22 @@ def submit_reply(page, logger):
         return False
 
 
-def reply_to_post(page, post_url, config, logger, post_id=None):
+def reply_to_post(page, post_url, config, logger, post_id=None,
+                  prior_attempts=0, previous_status=None):
     """打开帖子并回复（页面交互层，评论生成委托给 generate_comment）
     返回 (status, comment, meta): status="SUCCESS"/"FAILED"/"UNKNOWN"/"AUTH_EXPIRED"
-    meta 包含 quality_score, comment_source, duration_ms, title, verification, error
+    meta 包含 quality_score, comment_source, duration_ms, title, verification, error, attempts
+
+    prior_attempts/previous_status: 恢复场景下上次处理的次数与来源状态
     """
     start_time = time.time()
     pid = post_id or normalize_post_id(post_url)
-    logger.info("[POST %s] DISCOVERED", pid)
+    attempts = (prior_attempts or 0) + 1
+    logger.info("[POST %s] DISCOVERED (attempts=%d%s)", pid, attempts,
+                ", 恢复自 " + previous_status if previous_status else "")
 
     meta = {"quality_score": 0, "comment_source": "", "duration_ms": 0,
-            "title": "", "verification": "", "error": None}
+            "title": "", "verification": "", "error": None, "attempts": attempts}
 
     try:
         timeout = config.get("page_timeout_ms", 90000)
@@ -1751,29 +2061,74 @@ def reply_to_post(page, post_url, config, logger, post_id=None):
         meta["title"] = (title or "")[:80]
         logger.info("帖子标题: %s", title)
 
-        # 生成评论（纯逻辑，不涉及页面操作）
-        comment_source = "ai" if config.get("deepseek_api_key") else "template"
-        comment = generate_comment(title, content, config)
+        # 生成评论（纯逻辑，不涉及页面操作）；V3.3-beta 起返回结构化元数据
+        gen = generate_comment(title, content, config)
+        comment = gen["comment"]
+        comment_source = gen["source"]
+        ai_attempts = gen["ai_attempts"]
+        fallback_reason = gen["fallback_reason"] if gen["fallback"] else ""
         if comment == "SKIP":
             logger.info("[POST %s] SKIPPED - 判断为不可回复", pid)
             meta["duration_ms"] = int((time.time() - start_time) * 1000)
-            record_post_execution(pid, title, "SKIPPED", error="judged_skip")
+            record_post_execution(pid, title, "SKIPPED", comment_source=comment_source,
+                                   attempts=attempts, previous_status=previous_status,
+                                   ai_attempts=ai_attempts, error="judged_skip")
             return ("FAILED", None, meta)
         logger.info("[POST %s] GENERATED: %s", pid, comment)
         meta["comment_source"] = comment_source
+        meta["ai_attempts"] = ai_attempts
+        meta["fallback_reason"] = fallback_reason
+        if fallback_reason:
+            logger.info("[POST %s] 评论来源: %s (AI尝试%d次, 回退原因=%s)",
+                        pid, comment_source, ai_attempts, fallback_reason)
+        else:
+            logger.info("[POST %s] 评论来源: %s", pid, comment_source)
 
         # 评论质量评分
         quality_score, quality_detail = score_comment_quality(comment, title, content)
 
-        # 评论重复检测
+        # 评论重复检测（V3.3-final：高重复直接拒绝并重新生成，而非扣分照发）
         recent = get_recent_comments(days=7)
         if recent:
             is_sim, max_sim, sim_comment = is_comment_too_similar(comment, recent)
             if is_sim:
-                logger.warning("[POST %s] 评论与历史相似度 %.0f%%，扣减重复分: %s",
+                logger.warning("[POST %s] 评论与历史相似度 %.0f%%，拒绝并重新生成: %s",
                                pid, max_sim * 100, sim_comment[:30])
-                quality_detail.pop("length_repeat", None)
-                quality_score = sum(quality_detail.values())
+                gen2 = generate_comment(title, content, config)
+                comment2 = gen2["comment"]
+                if comment2 != "SKIP" and _is_reply_valid(comment2, title, content):
+                    is_sim2, max_sim2, _ = is_comment_too_similar(comment2, recent)
+                    if not is_sim2:
+                        logger.info("[POST %s] 重新生成通过重复检测，采用新评论", pid)
+                        comment = comment2
+                        comment_source = gen2["source"]
+                        ai_attempts = gen2["ai_attempts"]
+                        fallback_reason = gen2["fallback_reason"] if gen2["fallback"] else ""
+                        meta["comment_source"] = comment_source
+                        meta["ai_attempts"] = ai_attempts
+                        meta["fallback_reason"] = fallback_reason
+                        quality_score, quality_detail = score_comment_quality(comment, title, content)
+                    else:
+                        logger.warning("[POST %s] 重新生成仍相似度 %.0f%%，放弃该帖子",
+                                       pid, max_sim2 * 100)
+                        meta["duration_ms"] = int((time.time() - start_time) * 1000)
+                        meta["error"] = "too_similar"
+                        record_post_execution(pid, title, "FAILED", comment=comment,
+                                               comment_source=comment_source, attempts=attempts,
+                                               previous_status=previous_status,
+                                               ai_attempts=ai_attempts, fallback_reason=fallback_reason,
+                                               duration_ms=meta["duration_ms"], error="too_similar")
+                        return ("FAILED", None, meta)
+                else:
+                    logger.warning("[POST %s] 重新生成失败或无效，放弃该帖子", pid)
+                    meta["duration_ms"] = int((time.time() - start_time) * 1000)
+                    meta["error"] = "too_similar"
+                    record_post_execution(pid, title, "FAILED", comment=comment,
+                                           comment_source=comment_source, attempts=attempts,
+                                           previous_status=previous_status,
+                                           ai_attempts=ai_attempts, fallback_reason=fallback_reason,
+                                           duration_ms=meta["duration_ms"], error="too_similar")
+                    return ("FAILED", None, meta)
 
         logger.info("[POST %s] 质量评分: %d/100 (%s)", pid, quality_score, quality_detail)
         meta["quality_score"] = quality_score
@@ -1788,7 +2143,8 @@ def reply_to_post(page, post_url, config, logger, post_id=None):
             logger.error("未找到回复输入框，跳过此帖子")
             meta["duration_ms"] = int((time.time() - start_time) * 1000)
             meta["error"] = "editor_not_found"
-            record_post_execution(pid, title, "FAILED", error="editor_not_found",
+            record_post_execution(pid, title, "FAILED", attempts=attempts,
+                                   previous_status=previous_status, error="editor_not_found",
                                    duration_ms=meta["duration_ms"])
             return ("FAILED", None, meta)
 
@@ -1797,7 +2153,8 @@ def reply_to_post(page, post_url, config, logger, post_id=None):
             meta["duration_ms"] = int((time.time() - start_time) * 1000)
             meta["error"] = "input_failed"
             record_post_execution(pid, title, "FAILED", comment=comment,
-                                   comment_source=comment_source,
+                                   comment_source=comment_source, attempts=attempts,
+                                   previous_status=previous_status,
                                    duration_ms=meta["duration_ms"], error="input_failed")
             return ("FAILED", None, meta)
 
@@ -1808,7 +2165,8 @@ def reply_to_post(page, post_url, config, logger, post_id=None):
             meta["duration_ms"] = int((time.time() - start_time) * 1000)
             meta["error"] = "editor_empty"
             record_post_execution(pid, title, "FAILED", comment=comment,
-                                   comment_source=comment_source,
+                                   comment_source=comment_source, attempts=attempts,
+                                   previous_status=previous_status,
                                    duration_ms=meta["duration_ms"], error="editor_empty")
             return ("FAILED", None, meta)
 
@@ -1821,52 +2179,63 @@ def reply_to_post(page, post_url, config, logger, post_id=None):
             meta["duration_ms"] = int((time.time() - start_time) * 1000)
             meta["error"] = "submit_failed"
             record_post_execution(pid, title, "FAILED", comment=comment,
-                                   comment_source=comment_source,
+                                   comment_source=comment_source, attempts=attempts,
+                                   previous_status=previous_status,
                                    duration_ms=meta["duration_ms"], error="submit_failed")
             return ("FAILED", None, meta)
 
-        result = wait_reply_result(page, logger, previous_editor_text,
-                                   initial_comments=initial_comments, post_id=post_id)
+        result, verify_method = wait_reply_result(page, logger, previous_editor_text,
+                                                   initial_comments=initial_comments, post_id=post_id)
 
         meta["duration_ms"] = int((time.time() - start_time) * 1000)
 
-        # 登录失效需要单独处理。
+        # 登录失效需要单独处理：提交已发出但无法确认结果，转入 PENDING_VERIFY。
         if result is False:
             err = get_visible_error_message(page)
             if "登录" in err or "登陆" in err:
                 logger.error("登录状态已失效！请重新运行 --login 配置登录")
-                logger.info("[POST %s] AUTH_EXPIRED", pid)
+                logger.info("[POST %s] AUTH_EXPIRED -> PENDING_VERIFY", pid)
                 meta["error"] = "auth_expired"
                 record_post_execution(pid, title, "AUTH_EXPIRED", comment=comment,
-                                       comment_source=comment_source,
+                                       comment_source=comment_source, attempts=attempts,
+                                       previous_status=previous_status,
+                                       ai_attempts=ai_attempts, fallback_reason=fallback_reason,
                                        duration_ms=meta["duration_ms"], error="auth_expired")
-                return ("AUTH_EXPIRED", None, meta)
+                mark_pending_verify(pid, post_url, title, comment,
+                                    reason="auth_expired", attempts=attempts,
+                                    previous_status="AUTH_EXPIRED")
+                return ("AUTH_EXPIRED", comment, meta)
 
         if result is True:
             logger.info("[POST %s] SUCCESS", pid)
             # 成功提示出现后再关闭可关闭的提示，不删除未知弹窗。
             close_safe_popup(page, logger)
-            meta["verification"] = "verified"
+            meta["verification"] = verify_method or "unverified"
             record_post_execution(pid, title, "SUCCESS", comment=comment,
                                    comment_source=comment_source,
-                                   quality_score=quality_score,
+                                   quality_score=quality_score, attempts=attempts,
+                                   previous_status=previous_status,
+                                   ai_attempts=ai_attempts, fallback_reason=fallback_reason,
                                    duration_ms=meta["duration_ms"],
-                                   verification="verified")
+                                   verification=verify_method)
             return ("SUCCESS", comment, meta)
 
         if result is None:
             # 状态未知：不要把它记为成功，也不要再次提交。
-            logger.warning("[POST %s] UNKNOWN - 状态未知，不重复提交", pid)
+            logger.warning("[POST %s] UNKNOWN - 状态未知，转入待验证，不重复提交", pid)
             record_post_execution(pid, title, "UNKNOWN", comment=comment,
                                    comment_source=comment_source,
-                                   quality_score=quality_score,
+                                   quality_score=quality_score, attempts=attempts,
+                                   previous_status=previous_status,
+                                   ai_attempts=ai_attempts, fallback_reason=fallback_reason,
                                    duration_ms=meta["duration_ms"])
             return ("UNKNOWN", comment, meta)
 
         logger.info("[POST %s] FAILED", pid)
         meta["error"] = "result_false"
         record_post_execution(pid, title, "FAILED", comment=comment,
-                               comment_source=comment_source,
+                               comment_source=comment_source, attempts=attempts,
+                               previous_status=previous_status,
                                duration_ms=meta["duration_ms"], error="result_false")
         return ("FAILED", None, meta)
 
@@ -1874,21 +2243,25 @@ def reply_to_post(page, post_url, config, logger, post_id=None):
         logger.error("回复帖子时出错: %s", e)
         meta["duration_ms"] = int((time.time() - start_time) * 1000)
         meta["error"] = str(e)
-        record_post_execution(pid, meta.get("title", ""), "FAILED",
+        record_post_execution(pid, meta.get("title", ""), "FAILED", attempts=attempts,
+                               previous_status=previous_status,
                                error=str(e), duration_ms=meta["duration_ms"])
         return ("FAILED", None, meta)
 
 
 def verify_existing_comment(page, expected_comment, logger):
-    """检查页面上是否已存在之前 UNKNOWN 状态的评论文本
+    """检查页面上是否已存在之前提交的评论文本（三态，V3.3-alpha 修复）
 
     保守处理：只能证明相同文本出现在页面上，不能确定是当前账号发表的。
-    返回 True=明确找到 / False=明确没找到 / None=无法检测
+    返回:
+      True  = 明确找到评论
+      False = 明确扫描到了评论列表，但没有找到（可安全重新提交）
+      None  = 评论列表没有成功加载 / 无法判断（绝对不能重新提交）
     """
     if not expected_comment:
         return None
     try:
-        found = page.evaluate(
+        result = page.evaluate(
             '''(expected) => {
                 var selectors = [
                     ".comment-list .comment-item",
@@ -1898,17 +2271,29 @@ def verify_existing_comment(page, expected_comment, logger):
                     "[class*='comment'] [class*='item']",
                     "[class*='reply'] [class*='item']"
                 ];
+                var scanned = false;
                 for (var i = 0; i < selectors.length; i++) {
                     var items = document.querySelectorAll(selectors[i]);
-                    for (var j = 0; j < items.length; j++) {
-                        if (items[j].textContent.includes(expected)) return true;
+                    if (items.length > 0) {
+                        scanned = true;
+                        for (var j = 0; j < items.length; j++) {
+                            if (items[j].textContent.includes(expected)) {
+                                return {found: true, scanned: true};
+                            }
+                        }
                     }
                 }
-                return false;
+                return {found: false, scanned: scanned};
             }''',
             expected_comment
         )
-        return bool(found)
+        if not isinstance(result, dict):
+            return None
+        if result.get("found"):
+            return True
+        if result.get("scanned"):
+            return False
+        return None
     except Exception:
         return None
 
@@ -2029,7 +2414,7 @@ def run_signin():
     config = load_config()
 
     logger.info("=" * 50)
-    logger.info("采蘑菇论坛自动签到开始")
+    logger.info("采蘑菇论坛自动签到开始 (V%s)", VERSION)
     logger.info("时间: %s", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     logger.info("=" * 50)
 
@@ -2072,6 +2457,9 @@ def _run_signin_locked(logger, config, reply_count, headless, already_count, rem
         "target": reply_count, "success": 0, "failed": 0,
         "unknown": 0, "skipped": 0, "ai_comments": 0,
         "template_comments": 0, "quality_scores": [], "duration_s": 0,
+        # V3.3-beta 评论来源细分
+        "ai_retry_comments": 0, "template_fallback_comments": 0,
+        "fallback_reasons": {},
     }
     with sync_playwright() as p:
         browser, context = create_context(
@@ -2120,21 +2508,36 @@ def _run_signin_locked(logger, config, reply_count, headless, already_count, rem
                             i + 1, success_count, reply_count)
                 logger.info("标题: %s", post["title"])
 
-                # UNKNOWN 恢复：上次提交状态未知，先检查评论是否已存在
+                # 挂起帖子优先验证（PENDING_VERIFY / 旧版 pending_review 均走此流程）：
+                # 已执行过提交但结果未确认，先检查评论是否已存在，确认前绝不再次提交。
+                prior_attempts, prior_status = 0, None
                 if post_id in unknown_posts:
-                    expected = unknown_posts[post_id].get("comment", "")
-                    logger.info("发现上次 UNKNOWN 记录，检查评论是否已存在")
+                    pending_entry = unknown_posts[post_id]
+                    expected = pending_entry.get("comment", "")
+                    prior_attempts = pending_entry.get("attempts", 1)
+                    prior_status = pending_origin_status(pending_entry)
+                    if not expected:
+                        logger.info("上次挂起记录缺少评论文本，无法验证，继续挂起: %s", post["title"])
+                        stats["skipped"] += 1
+                        continue
+                    logger.info("发现挂起记录(status=%s, reason=%s, attempts=%d)，优先验证评论是否已存在",
+                                pending_entry.get("status", "pending_review"),
+                                pending_entry.get("reason", "unknown"),
+                                prior_attempts)
                     timeout = config.get("page_timeout_ms", 90000)
                     goto_with_retry(page, post["url"], logger, timeout=timeout)
                     page.wait_for_timeout(3000)
                     verify_result = verify_existing_comment(page, expected, logger)
                     if verify_result is True:
-                        logger.info("[POST %s] VERIFIED - 确认上次 UNKNOWN 评论已存在", post_id)
+                        logger.info("[POST %s] VERIFIED - 确认上次评论已存在", post_id)
                         success_count += 1
                         stats["success"] += 1
                         mark_today_progress(success_count, reply_count, post_id, result=True)
                         record_post_execution(post_id, post["title"][:80], "VERIFIED",
-                                               comment=expected, verification="existing_comment")
+                                               comment=expected,
+                                               attempts=prior_attempts + 1,
+                                               previous_status=prior_status,
+                                               verification="existing_comment")
                         replied_ids.add(post_id)
                         replied_history.add(post_id)
                         unknown_posts.pop(post_id, None)
@@ -2146,24 +2549,38 @@ def _run_signin_locked(logger, config, reply_count, headless, already_count, rem
                             time.sleep(delay)
                         continue
                     elif verify_result is False:
-                        logger.info("上次 UNKNOWN 评论确认不存在，尝试重新回复: %s", post["title"])
+                        # 三态语义下 False = 已扫描评论列表且明确不存在，可安全重新提交
+                        logger.info("上次评论确认不存在（已扫描评论列表），尝试重新回复: %s", post["title"])
                         unknown_posts.pop(post_id, None)
                     else:
-                        logger.info("上次 UNKNOWN 评论无法检测，跳过避免重复提交: %s", post["title"])
+                        # None = 评论列表未加载/无法判断：继续挂起，绝对不能提交
+                        logger.info("上次评论无法检测，继续挂起避免重复提交: %s", post["title"])
                         stats["skipped"] += 1
                         continue
 
-                result, reply_comment, meta = reply_to_post(page, post["url"], config, logger, post_id=post_id)
+                result, reply_comment, meta = reply_to_post(
+                    page, post["url"], config, logger, post_id=post_id,
+                    prior_attempts=prior_attempts, previous_status=prior_status)
 
                 if result == "AUTH_EXPIRED":
-                    logger.error("登录已过期，请重新运行 --login 配置登录后再次签到")
+                    logger.error("登录已过期，帖子已转入待验证；请重新运行 --login 配置登录后再次签到")
+                    # reply_to_post 内已通过 mark_pending_verify 落盘，这里同步本地缓存
+                    unknown_posts = get_unknown_posts()
                     auth_expired = True
                     break
                 elif result == "SUCCESS":
                     success_count += 1
                     stats["success"] += 1
-                    if meta.get("comment_source") == "ai":
+                    src = meta.get("comment_source")
+                    if src == "ai":
                         stats["ai_comments"] += 1
+                    elif src == "ai_retry":
+                        stats["ai_retry_comments"] += 1
+                    elif src == "template_fallback":
+                        stats["template_fallback_comments"] += 1
+                        reason = meta.get("fallback_reason") or "unknown"
+                        reasons = stats["fallback_reasons"]
+                        reasons[reason] = reasons.get(reason, 0) + 1
                     else:
                         stats["template_comments"] += 1
                     if meta.get("quality_score"):
@@ -2181,17 +2598,17 @@ def _run_signin_locked(logger, config, reply_count, headless, already_count, rem
                         logger.info("等待 %d 秒...", delay)
                         time.sleep(delay)
                 elif result == "UNKNOWN":
-                    # 状态未知：记录但不计入成功，不重复提交
+                    # 状态未知：记录但不计入成功，不重复提交，下次运行优先验证
                     stats["unknown"] += 1
                     if meta.get("quality_score"):
                         stats["quality_scores"].append(meta["quality_score"])
-                    logger.warning("回复状态未知，已记录待人工复核")
-                    mark_today_progress(success_count, reply_count, post_id, result=None, comment=reply_comment)
-                    unknown_posts[post_id] = {
-                        "date": date.today().isoformat(),
-                        "comment": reply_comment or "",
-                        "status": "pending_review",
-                    }
+                    logger.warning("回复状态未知，已转入待验证(pending_verify)")
+                    mark_today_progress(success_count, reply_count)
+                    pending_entry = mark_pending_verify(
+                        post_id, post["url"], meta.get("title") or post["title"],
+                        reply_comment, reason="timeout",
+                        attempts=meta.get("attempts", 1), previous_status="UNKNOWN")
+                    unknown_posts[post_id] = pending_entry
                     if success_count < reply_count:
                         mean = (config["min_delay"] + config["max_delay"]) / 2
                         std = (config["max_delay"] - config["min_delay"]) / 4
@@ -2295,13 +2712,17 @@ def show_test_comments():
         logger.info("-" * 40)
         logger.info("标题: %s", title)
         logger.info("正文: %s", content)
-        comment = generate_comment(title, content, config)
+        gen = generate_comment(title, content, config)
+        comment = gen["comment"]
         char_count = _comment_len(comment)
         logger.info("判断: %s", decision)
         if comment == "SKIP":
             logger.info("结果: SKIP")
         else:
-            source = "AI" if config.get("deepseek_api_key") else "模板"
+            source = {"ai": "AI", "ai_retry": "AI重试", "template": "模板",
+                      "template_fallback": "模板fallback"}.get(gen["source"], gen["source"])
+            if gen.get("fallback"):
+                source += f"({gen.get('fallback_reason', '')})"
             score, detail = score_comment_quality(comment, title, content)
             logger.info("评论: %s (%d字) [%s]", comment, char_count, source)
             logger.info("质量评分: %d/100 (%s)", score, detail)
