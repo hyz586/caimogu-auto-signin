@@ -3,6 +3,7 @@
 """V3.3 验收测试（alpha 状态层 + beta 数据层，离线 mock，不访问网络，不触碰真实数据文件）"""
 
 import json
+import subprocess
 import sys
 import tempfile
 import importlib.util
@@ -19,9 +20,13 @@ spec.loader.exec_module(cs)
 TMP = Path(tempfile.mkdtemp(prefix="v33test_"))
 cs.PATHS["replied"] = TMP / "replied_posts.json"
 cs.SCRIPT_DIR = TMP  # 让 daily_report.json 写入临时目录
+cs.PATHS["api_key_enc"] = TMP / "api_key.enc"
+cs.PATHS["auth_enc"] = TMP / "auth_state.enc"
+cs.PATHS["auth"] = TMP / "auth_state.json"
 
 ORIG_GENERATE_COMMENT = cs.generate_comment  # 第4-7节会 mock，第9节需调用原函数
 ORIG_GENERATE_TEMPLATE = cs.generate_comment_template  # 第10节起会 mock，gamma 节需调用原函数
+ORIG_SUBMIT_REPLY = cs.submit_reply  # 第4/16节会 mock，第26节需调用原函数
 
 PASS, FAIL = [], []
 
@@ -743,10 +748,166 @@ check("记录 error=too_similar", rec.get("status") == "FAILED" and rec.get("err
 # ============================================================
 print("\n== 14. 状态机与版本 ==")
 check("POST_STATUS 包含 PENDING_VERIFY", "PENDING_VERIFY" in cs.POST_STATUS)
-check("版本号为 3.3.0", cs.VERSION == "3.3.0", f"got {cs.VERSION}")
+check("版本号为 3.4.0", cs.VERSION == "3.4.0", f"got {cs.VERSION}")
 check("通用模板九类齐全",
       set(cs._REPLY_TEMPLATES_GENERIC.keys()) == set(cs._REPLY_TEMPLATES.keys()),
       f"got {sorted(cs._REPLY_TEMPLATES_GENERIC.keys())}")
+
+# ============================================================
+# 15. 防错发：URL 匹配与编辑器文本一致
+# ============================================================
+print("\n== 15. 防错发 helper ==")
+check("URL 与帖子 ID 匹配",
+      cs.page_url_matches_post_id("https://www.caimogu.cc/post/2467001.html", "2467001"))
+check("URL 与帖子 ID 不匹配",
+      not cs.page_url_matches_post_id("https://www.caimogu.cc/post/2467002.html", "2467001"))
+check("空 URL 视为不匹配", not cs.page_url_matches_post_id("", "2467001"))
+check("编辑器文本一致", cs.editor_text_matches("画面不错，等实测。", "画面不错，等实测。"))
+check("编辑器文本不一致", not cs.editor_text_matches("画面不错，等实测。", "画面很差"))
+check("个人中心 URL 为正向登录信号",
+      cs.page_url_is_user_settings("https://www.caimogu.cc/user/setting.html"))
+check("登录页 URL 不是个人中心", not cs.page_url_is_user_settings("https://www.caimogu.cc/login.html"))
+
+# ============================================================
+# 16. 防重复：提交后异常转待验证
+# ============================================================
+print("\n== 16. 提交后异常转待验证 ==")
+reset_data()
+fake_page2 = FakePage()
+fake_page2.url = "https://www.caimogu.cc/post/2467100.html"
+cs.goto_with_retry = lambda page, url, logger, timeout=90000, retries=2: True
+cs.inspect_popup = lambda page, logger: None
+cs.extract_post_info = lambda page: ("某游戏更新公告", "正文内容")
+cs.generate_comment = lambda title, content, config: dict(GEN_AI)
+cs.find_editor = lambda page, logger: object()
+cs.input_comment = lambda page, editor, comment, logger: True
+cs.get_reply_editor_text = lambda page: GEN_AI["comment"]
+cs.get_comment_count = lambda page, logger: 0
+cs.submit_reply = lambda page, logger: True
+cs.close_safe_popup = lambda page, logger: None
+
+
+def wait_boom(page, logger, prev, initial_comments=None, post_id=None):
+    raise RuntimeError("post-submit boom")
+
+
+cs.wait_reply_result = wait_boom
+
+status16, out16, meta16 = cs.reply_to_post(
+    fake_page2,
+    "https://www.caimogu.cc/post/2467100.html",
+    {"page_timeout_ms": 5000},
+    lg,
+    post_id="2467100",
+)
+check("提交后异常返回 UNKNOWN", status16 == "UNKNOWN", f"got {status16}")
+d16 = load_data()
+rec16 = [r for r in d16.get("post_records", []) if r.get("post_id") == "2467100"][-1]
+check("记录为 UNKNOWN 而非 FAILED", rec16.get("status") == "UNKNOWN", f"got {rec16}")
+check("保留异常原因", "post-submit boom" in (rec16.get("error") or ""))
+
+# ============================================================
+# 26. V3.4: Cookie 白名单 / 加密文件 ACL / 提交防双击
+# ============================================================
+print("\n== 26. V3.4: 安全与防错发强化 ==")
+
+state26 = {
+    "cookies": [
+        {"name": "cmg_token", "domain": ".caimogu.cc", "value": "t"},
+        {"name": "CAIMOGU", "domain": ".caimogu.cc", "value": "s"},
+        {"name": "_clck", "domain": ".caimogu.cc", "value": "x"},        # MS Clarity
+        {"name": "Hm_lvt_abc", "domain": ".caimogu.cc", "value": "x"},   # 百度统计
+        {"name": "__gads", "domain": ".caimogu.cc", "value": "x"},       # AdSense
+        {"name": "other", "domain": ".example.com", "value": "x"},
+    ],
+    "origins": [
+        {"origin": "https://www.caimogu.cc"},
+        {"origin": "https://ads.example.com"},
+    ],
+}
+out26 = cs.sanitize_storage_state(state26)
+names26 = [c["name"] for c in out26["cookies"]]
+check("Cookie 白名单收敛：仅保留 cmg_token/CAIMOGU",
+      names26 == ["cmg_token", "CAIMOGU"], f"got {names26}")
+check("非采蘑菇域 Cookie 与 Origin 被过滤",
+      [o["origin"] for o in out26["origins"]] == ["https://www.caimogu.cc"])
+
+state_fb = {"cookies": [
+    {"name": "_clck", "domain": ".caimogu.cc", "value": "x"},
+    {"name": "other", "domain": ".example.com", "value": "x"},
+]}
+out_fb = cs.sanitize_storage_state(state_fb)
+check("白名单全空时回退域过滤（防站点改 Cookie 名丢登录）",
+      [c["name"] for c in out_fb["cookies"]] == ["_clck"],
+      f"got {[c['name'] for c in out_fb['cookies']]}")
+
+enc26 = cs.PATHS["api_key_enc"]  # 已指向 TMP
+cs._secure_write_text(enc26, "test-secret")
+acl26 = subprocess.run(["icacls", str(enc26)],
+                       capture_output=True, text=True).stdout
+check("加密文件去除继承 ACL（无 (I) 条目）", "(I)" not in acl26, acl26.strip())
+check("加密文件不开放 Users 组", "Users:" not in acl26, acl26.strip())
+check("加密文件不开放 Authenticated Users", "Authenticated" not in acl26, acl26.strip())
+check("加密文件当前用户保留完全控制", "(F)" in acl26, acl26.strip())
+
+
+class SubmitTestPage(FakePage):
+    """submit_reply 离线测试页：注入点击失败/提交后等待崩溃"""
+
+    def __init__(self, fail_first_click=False, always_fail_click=False,
+                 crash_after_click=False):
+        super().__init__()
+        self.click_count = 0
+        self.js_click_count = 0
+        self.fail_first_click = fail_first_click
+        self.always_fail_click = always_fail_click
+        self.crash_after_click = crash_after_click
+
+    def query_selector(self, sel):
+        if sel == ".btn-reply-root":
+            outer = self
+
+            class _Btn:
+                def click(self):
+                    outer.click_count += 1
+                    if outer.always_fail_click:
+                        raise RuntimeError("click intercepted")
+                    if outer.fail_first_click and outer.click_count == 1:
+                        raise RuntimeError("click intercepted")
+
+            return _Btn()
+        return None
+
+    def evaluate(self, script, *args):
+        if "el.click" in script and args:
+            self.js_click_count += 1
+            args[0].click()
+            return None
+        return super().evaluate(script, *args)
+
+    def wait_for_timeout(self, ms):
+        if self.crash_after_click:
+            raise RuntimeError("page crashed after click")
+
+
+cs.submit_reply = ORIG_SUBMIT_REPLY
+
+p1 = SubmitTestPage(crash_after_click=True)
+check("点击成功后等待异常 -> 按已提交处理返回 True", cs.submit_reply(p1, lg) is True)
+check("等待异常后不补点（总点击=1，JS点击=0）",
+      p1.click_count == 1 and p1.js_click_count == 0,
+      f"clicks={p1.click_count}, js={p1.js_click_count}")
+
+p2 = SubmitTestPage(fail_first_click=True)
+check("首次点击失败时 JS 兜底提交成功", cs.submit_reply(p2, lg) is True)
+check("JS 兜底只补点一次（总点击=2，JS点击=1）",
+      p2.click_count == 2 and p2.js_click_count == 1,
+      f"clicks={p2.click_count}, js={p2.js_click_count}")
+
+p3 = SubmitTestPage(always_fail_click=True)
+check("两次点击都失败 -> 返回 False", cs.submit_reply(p3, lg) is False)
+check("两次点击都失败时不触发第三次点击",
+      p3.click_count == 2, f"clicks={p3.click_count}")
 
 # ============================================================
 print("\n" + "=" * 50)

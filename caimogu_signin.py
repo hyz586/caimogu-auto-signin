@@ -18,6 +18,9 @@ import random
 import time
 import sys
 import logging
+import ctypes
+from ctypes import wintypes
+from urllib.parse import urlsplit
 from datetime import datetime, date, timedelta
 from pathlib import Path
 
@@ -30,7 +33,7 @@ except ImportError:
 #  1. 路径与常量
 # ============================================================
 
-VERSION = "3.3.0"
+VERSION = "3.4.0"
 
 if getattr(sys, "frozen", False):
     SCRIPT_DIR = Path(sys.executable).parent.absolute()
@@ -40,10 +43,325 @@ else:
 PATHS = {
     "config":  SCRIPT_DIR / "config.json",
     "auth":    SCRIPT_DIR / "auth_state.json",
+    "auth_enc": SCRIPT_DIR / "auth_state.enc",
+    "api_key_enc": SCRIPT_DIR / "api_key.enc",
     "replied": SCRIPT_DIR / "replied_posts.json",
     "log":     SCRIPT_DIR / "signin_log.txt",
     "lock":    SCRIPT_DIR / "signin.lock",
 }
+
+SECURE_MAGIC = b"CMGSEC1"
+SECURE_DESCRIPTION = "caimogu-auto-signin"
+
+if os.name == "nt":
+    class _DATA_BLOB(ctypes.Structure):
+        _fields_ = [
+            ("cbData", wintypes.DWORD),
+            ("pbData", ctypes.POINTER(ctypes.c_byte)),
+        ]
+
+    _crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    _crypt32.CryptProtectData.argtypes = [
+        ctypes.POINTER(_DATA_BLOB),
+        wintypes.LPCWSTR,
+        ctypes.POINTER(_DATA_BLOB),
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(_DATA_BLOB),
+    ]
+    _crypt32.CryptProtectData.restype = wintypes.BOOL
+
+    _crypt32.CryptUnprotectData.argtypes = [
+        ctypes.POINTER(_DATA_BLOB),
+        wintypes.LPCWSTR,
+        ctypes.POINTER(_DATA_BLOB),
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(_DATA_BLOB),
+    ]
+    _crypt32.CryptUnprotectData.restype = wintypes.BOOL
+
+    _kernel32.LocalFree.argtypes = [wintypes.HLOCAL]
+    _kernel32.LocalFree.restype = wintypes.HLOCAL
+else:
+    _DATA_BLOB = None
+    _crypt32 = None
+    _kernel32 = None
+
+
+def _blob_from_bytes(data):
+    raw = bytes(data)
+    buf = ctypes.create_string_buffer(raw, len(raw) + 1)
+    return _DATA_BLOB(len(raw), ctypes.cast(buf, ctypes.POINTER(ctypes.c_byte)))
+
+
+def _blob_to_bytes(blob):
+    if not blob or not blob.pbData:
+        return b""
+    return ctypes.string_at(blob.pbData, blob.cbData)
+
+
+def _free_blob(blob):
+    if blob and blob.pbData and _kernel32 is not None:
+        _kernel32.LocalFree(blob.pbData)
+
+
+def _protect_bytes(data):
+    if _crypt32 is None:
+        raise RuntimeError("DPAPI 加密仅在 Windows 上可用")
+    in_blob = _blob_from_bytes(data)
+    out_blob = _DATA_BLOB()
+    try:
+        ok = _crypt32.CryptProtectData(
+            ctypes.byref(in_blob),
+            SECURE_DESCRIPTION,
+            None,
+            None,
+            None,
+            0,
+            ctypes.byref(out_blob),
+        )
+        if not ok:
+            raise ctypes.WinError(ctypes.get_last_error())
+        return _blob_to_bytes(out_blob)
+    finally:
+        _free_blob(out_blob)
+
+
+def _unprotect_bytes(data):
+    if _crypt32 is None:
+        raise RuntimeError("DPAPI 解密仅在 Windows 上可用")
+    in_blob = _blob_from_bytes(data)
+    out_blob = _DATA_BLOB()
+    try:
+        ok = _crypt32.CryptUnprotectData(
+            ctypes.byref(in_blob),
+            None,
+            None,
+            None,
+            None,
+            0,
+            ctypes.byref(out_blob),
+        )
+        if not ok:
+            raise ctypes.WinError(ctypes.get_last_error())
+        return _blob_to_bytes(out_blob)
+    finally:
+        _free_blob(out_blob)
+
+
+def _current_user_sid():
+    """获取当前用户 SID（whoami /user 解析，失败返回 None）"""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["whoami", "/user", "/fo", "csv"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            lines = result.stdout.strip().splitlines()
+            if len(lines) >= 2:
+                sid = lines[1].rsplit(",", 1)[-1].strip().strip('"')
+                if sid.startswith("S-1-"):
+                    return sid
+    except Exception:
+        pass
+    return None
+
+
+def _tighten_file_acl(path):
+    """移除继承 ACL，仅保留当前用户/SYSTEM/管理员完全控制。
+
+    加密文件每次都通过 tmp+replace 重新创建，会重新继承目录的宽权限，
+    所以每次写入后都要收紧。失败只记告警：DPAPI 已绑定当前用户，不影响安全。
+    """
+    if os.name != "nt":
+        return
+    import subprocess
+    sid = _current_user_sid()
+    if sid:
+        user_ref = "*" + sid
+    else:
+        user = (os.environ.get("USERDOMAIN", "") + "\\" +
+                os.environ.get("USERNAME", "")).strip("\\")
+        if not user:
+            return
+        user_ref = user
+    cmd = [
+        "icacls", str(path), "/inheritance:r",
+        "/grant:r", user_ref + ":F",
+        "/grant:r", "*S-1-5-18:F",
+        "/grant:r", "*S-1-5-32-544:F",
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        if result.returncode != 0:
+            logging.getLogger("caimogu").warning(
+                "收紧加密文件权限失败(可忽略，DPAPI 仍绑定当前用户): %s",
+                (result.stderr or result.stdout).strip())
+    except Exception as e:
+        logging.getLogger("caimogu").warning("收紧加密文件权限失败(可忽略): %s", e)
+
+
+def _secure_write_bytes(path, data):
+    tmp_path = path.with_name(path.name + ".tmp")
+    try:
+        with tmp_path.open("wb") as f:
+            f.write(SECURE_MAGIC + _protect_bytes(data))
+            f.flush()
+            os.fsync(f.fileno())
+        tmp_path.replace(path)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+    _tighten_file_acl(path)
+
+
+def _secure_read_bytes(path):
+    blob = path.read_bytes()
+    if not blob.startswith(SECURE_MAGIC):
+        raise ValueError("不支持的加密文件格式")
+    return _unprotect_bytes(blob[len(SECURE_MAGIC):])
+
+
+def _secure_write_text(path, text):
+    _secure_write_bytes(path, (text or "").encode("utf-8"))
+
+
+def _secure_read_text(path):
+    return _secure_read_bytes(path).decode("utf-8")
+
+
+def _is_caimogu_host(host):
+    host = (host or "").lower().rstrip(".").lstrip(".")
+    return host == "caimogu.cc" or host.endswith(".caimogu.cc")
+
+
+# 站点功能 Cookie 白名单：登录令牌 + 站点标识。
+# .caimogu.cc 域下其余 Cookie 基本都是第三方统计/广告（百度统计、Clarity、AdSense 等）
+AUTH_COOKIE_WHITELIST = {"cmg_token", "CAIMOGU"}
+
+
+def sanitize_storage_state(state):
+    """只保留采蘑菇域名的 Cookie 和 Origin；Cookie 进一步收敛到站点功能白名单。
+
+    白名单一条都匹配不到时回退为仅域过滤，避免站点更换 Cookie 名后丢登录。
+    """
+    if not isinstance(state, dict):
+        return {}
+
+    cookies = [
+        c for c in state.get("cookies", [])
+        if isinstance(c, dict) and _is_caimogu_host(c.get("domain", ""))
+    ]
+    whitelisted = [c for c in cookies if c.get("name") in AUTH_COOKIE_WHITELIST]
+    if whitelisted:
+        cookies = whitelisted
+
+    origins = []
+    for entry in state.get("origins", []):
+        if not isinstance(entry, dict):
+            continue
+        origin = entry.get("origin", "") or ""
+        host = urlsplit(origin).hostname if "://" in origin else origin
+        if _is_caimogu_host(host):
+            origins.append(entry)
+
+    result = dict(state)
+    result["cookies"] = cookies
+    result["origins"] = origins
+    return result
+
+
+def save_api_key(api_key):
+    _secure_write_text(PATHS["api_key_enc"], api_key)
+
+
+def get_api_key(config=None):
+    env_key = os.environ.get("CAIMOGU_DEEPSEEK_API_KEY", "").strip()
+    if env_key:
+        return env_key
+
+    if PATHS["api_key_enc"].exists():
+        try:
+            return _secure_read_text(PATHS["api_key_enc"]).strip()
+        except Exception as e:
+            logging.getLogger("caimogu").warning("读取加密 API Key 失败: %s", e)
+            return ""
+
+    legacy = ((config or {}).get("deepseek_api_key") or "").strip()
+    if legacy:
+        try:
+            save_api_key(legacy)
+            config["deepseek_api_key"] = ""
+            save_json(PATHS["config"], config)
+        except Exception as e:
+            logging.getLogger("caimogu").warning("迁移明文 API Key 失败: %s", e)
+        return legacy
+    return ""
+
+
+def save_auth_state(state):
+    sanitized = sanitize_storage_state(state)
+    _secure_write_bytes(
+        PATHS["auth_enc"],
+        json.dumps(sanitized, ensure_ascii=False).encode("utf-8"),
+    )
+    try:
+        if PATHS["auth"].exists():
+            PATHS["auth"].unlink()
+    except Exception:
+        pass
+
+
+def load_auth_state():
+    """读取加密登录状态；旧明文文件会迁移后删除。"""
+    if PATHS["auth_enc"].exists():
+        try:
+            raw = _secure_read_bytes(PATHS["auth_enc"])
+            return json.loads(raw.decode("utf-8"))
+        except Exception as e:
+            logging.getLogger("caimogu").warning("读取加密登录状态失败: %s", e)
+            return None
+
+    if PATHS["auth"].exists():
+        try:
+            state = json.loads(PATHS["auth"].read_text(encoding="utf-8"))
+        except Exception as e:
+            logging.getLogger("caimogu").warning("读取旧登录状态失败: %s", e)
+            return None
+        sanitized = sanitize_storage_state(state)
+        save_auth_state(sanitized)
+        return sanitized
+
+    return None
+
+
+def has_auth_state():
+    return PATHS["auth_enc"].exists() or PATHS["auth"].exists()
+
+
+def _migrate_config_secret(config):
+    legacy = (config.get("deepseek_api_key") or "").strip()
+    if not legacy:
+        return
+    if PATHS["api_key_enc"].exists():
+        logging.getLogger("caimogu").warning("检测到旧明文 API Key，但已有加密 Key，已忽略旧值")
+    else:
+        try:
+            save_api_key(legacy)
+        except Exception as e:
+            logging.getLogger("caimogu").warning("加密 API Key 失败: %s", e)
+            return
+    config["deepseek_api_key"] = ""
+    save_json(PATHS["config"], config)
 
 # 免安装版优先使用程序目录旁边的 Playwright 浏览器
 _browsers_dir = SCRIPT_DIR / "playwright-browsers"
@@ -477,7 +795,9 @@ def load_config():
         save_json(PATHS["config"], config)
         return config
     config.update(load_json(PATHS["config"], {}))
-    return validate_config(config)
+    config = validate_config(config)
+    _migrate_config_secret(config)
+    return config
 
 
 def get_today_reply_count():
@@ -512,6 +832,29 @@ def normalize_post_id(url):
     if m:
         return m.group(1)
     return url.rstrip('/').split('/')[-1]
+
+
+def page_url_matches_post_id(page_url, post_id):
+    """判断当前页面 URL 是否对应当前帖子 ID，避免在旧页面上误操作。"""
+    if not page_url or not post_id:
+        return False
+    try:
+        return normalize_post_id(page_url) == normalize_post_id(str(post_id))
+    except Exception:
+        return False
+
+
+def page_url_is_user_settings(page_url):
+    """判断当前 URL 是否为已登录可访问的用户设置页。"""
+    if not page_url:
+        return False
+    url_lower = page_url.lower()
+    return "/user/setting" in url_lower and "login" not in url_lower
+
+
+def editor_text_matches(actual, expected):
+    """判断编辑器里的实际文本是否与预期评论一致。"""
+    return _normalize_comment(actual or "") == _normalize_comment(expected or "")
 
 
 def get_unknown_posts():
@@ -1118,7 +1461,7 @@ def generate_comment(title, content, config):
 
     dict 字段见 generate_comment_ai；未配置 API Key 时 source="template", ai_attempts=0
     """
-    api_key = config.get("deepseek_api_key", "")
+    api_key = get_api_key(config)
     if api_key:
         base_url = config.get("deepseek_base_url", "https://api.deepseek.com/v1")
         model = config.get("deepseek_model", "deepseek-chat")
@@ -1499,7 +1842,9 @@ def get_post_list(page, config, count, logger):
     circle_url = config["circle_url"]
     logger.info("正在获取帖子列表: %s", circle_url)
     timeout = config.get("page_timeout_ms", 90000)
-    goto_with_retry(page, circle_url, logger, timeout=timeout)
+    if not goto_with_retry(page, circle_url, logger, timeout=timeout):
+        logger.error("板块页面加载失败")
+        return []
     page.wait_for_timeout(3000)
 
     try:
@@ -1589,7 +1934,12 @@ def find_editor(page, logger):
 def input_comment(page, editor, comment, logger):
     """输入评论到编辑器，依次尝试 Quill API → keyboard → fill → execCommand"""
 
-    def get_editor_text():
+    def get_editor_text(editor_handle=None):
+        try:
+            if editor_handle:
+                return editor_handle.inner_text().strip()
+        except Exception:
+            pass
         try:
             return page.evaluate('() => { var ed = document.querySelector(".ql-editor"); return ed ? ed.innerText.trim() : ""; }')
         except Exception:
@@ -1637,8 +1987,8 @@ def input_comment(page, editor, comment, logger):
         )
         if result:
             page.wait_for_timeout(300)
-            actual = get_editor_text()
-            if actual and len(actual) >= 5:
+            actual = get_editor_text(editor)
+            if editor_text_matches(actual, comment):
                 logger.info("评论已输入编辑器(Quill API)")
                 return True
     except Exception:
@@ -1658,8 +2008,8 @@ def input_comment(page, editor, comment, logger):
         page.wait_for_timeout(200)
         page.keyboard.type(comment, delay=50)
         page.wait_for_timeout(500)
-        actual = get_editor_text()
-        if actual and len(actual) >= 5:
+        actual = get_editor_text(editor)
+        if editor_text_matches(actual, comment):
             logger.info("评论已输入编辑器(keyboard)")
             return True
     except Exception:
@@ -1670,8 +2020,8 @@ def input_comment(page, editor, comment, logger):
     try:
         editor.fill(comment, timeout=5000)
         page.wait_for_timeout(500)
-        actual = get_editor_text()
-        if actual and len(actual) >= 5:
+        actual = get_editor_text(editor)
+        if editor_text_matches(actual, comment):
             logger.info("评论已输入编辑器(fill)")
             return True
     except Exception:
@@ -1689,8 +2039,8 @@ def input_comment(page, editor, comment, logger):
         page.wait_for_timeout(100)
         page.evaluate('(text) => { document.execCommand("insertText", false, text); }', comment)
         page.wait_for_timeout(500)
-        actual = get_editor_text()
-        if actual and len(actual) >= 5:
+        actual = get_editor_text(editor)
+        if editor_text_matches(actual, comment):
             logger.info("评论已输入编辑器(execCommand)")
             return True
     except Exception:
@@ -1992,34 +2342,38 @@ def submit_reply(page, logger):
         btn, sel = first_element(page, SELECTORS["submit"])
 
     if btn:
+        clicked = False
+        # 第一段：只负责把点击发出去。点击本身失败才用 JS 兜底，绝不重复点击。
         try:
             # 设置提交标志位，15秒后自动重置（防止异常导致永久阻塞）
             page.evaluate('() => { window.__caimogu_submit_flag = true; setTimeout(() => { window.__caimogu_submit_flag = false; }, 15000); }')
             btn.click()
+            clicked = True
             logger.info("点击提交按钮: %s", sel)
-            page.wait_for_timeout(2000)
-            return True
         except Exception as e:
-            # 提交失败，重置标志位
-            try:
-                page.evaluate('() => { window.__caimogu_submit_flag = false; }')
-            except Exception:
-                pass
             logger.error("点击提交按钮失败: %s", e)
             # 弹窗残留遮挡时，用 JS 直接派发点击
             try:
                 page.evaluate('() => { window.__caimogu_submit_flag = true; setTimeout(() => { window.__caimogu_submit_flag = false; }, 15000); }')
                 page.evaluate("(el) => el.click()", btn)
+                clicked = True
                 logger.info("JS 兜底点击提交按钮: %s", sel)
-                page.wait_for_timeout(2000)
-                return True
             except Exception as e2:
+                # 提交失败，重置标志位
                 try:
                     page.evaluate('() => { window.__caimogu_submit_flag = false; }')
                 except Exception:
                     pass
                 logger.error("JS 兜底点击仍失败: %s", e2)
-                return False
+
+        if clicked:
+            # 第二段：点击已发出。等待阶段的异常不能再补点，否则会重复回复。
+            try:
+                page.wait_for_timeout(2000)
+            except Exception:
+                logger.warning("提交后页面等待异常，按已提交处理")
+            return True
+        return False
 
     # 备选：Ctrl+Enter
     try:
@@ -2050,9 +2404,21 @@ def reply_to_post(page, post_url, config, logger, post_id=None,
     meta = {"quality_score": 0, "comment_source": "", "duration_ms": 0,
             "title": "", "verification": "", "error": None, "attempts": attempts}
 
+    submitted = False
+    comment = ""
+
     try:
         timeout = config.get("page_timeout_ms", 90000)
-        goto_with_retry(page, post_url, logger, timeout=timeout)
+        nav_ok = goto_with_retry(page, post_url, logger, timeout=timeout)
+        page_url = getattr(page, "url", post_url)
+        if not nav_ok or not page_url_matches_post_id(page_url, pid):
+            logger.error("[POST %s] 页面加载失败或 URL 不匹配，禁止回复: %s", pid, page_url)
+            meta["duration_ms"] = int((time.time() - start_time) * 1000)
+            meta["error"] = "navigation_failed"
+            record_post_execution(pid, post_url[:80], "FAILED", attempts=attempts,
+                                   previous_status=previous_status,
+                                   duration_ms=meta["duration_ms"], error="navigation_failed")
+            return ("FAILED", None, meta)
         page.wait_for_timeout(3000)
         inspect_popup(page, logger)
 
@@ -2184,6 +2550,7 @@ def reply_to_post(page, post_url, config, logger, post_id=None,
                                    duration_ms=meta["duration_ms"], error="submit_failed")
             return ("FAILED", None, meta)
 
+        submitted = True
         result, verify_method = wait_reply_result(page, logger, previous_editor_text,
                                                    initial_comments=initial_comments, post_id=post_id)
 
@@ -2243,6 +2610,24 @@ def reply_to_post(page, post_url, config, logger, post_id=None,
         logger.error("回复帖子时出错: %s", e)
         meta["duration_ms"] = int((time.time() - start_time) * 1000)
         meta["error"] = str(e)
+        if submitted:
+            logger.warning("[POST %s] 已提交但后续确认异常，转入待验证", pid)
+            record_post_execution(
+                pid,
+                meta.get("title", ""),
+                "UNKNOWN",
+                comment=comment,
+                comment_source=meta.get("comment_source", ""),
+                quality_score=meta.get("quality_score", 0),
+                attempts=attempts,
+                previous_status=previous_status,
+                ai_attempts=meta.get("ai_attempts", 0),
+                fallback_reason=meta.get("fallback_reason", ""),
+                duration_ms=meta["duration_ms"],
+                error=str(e),
+            )
+            return ("UNKNOWN", comment, meta)
+
         record_post_execution(pid, meta.get("title", ""), "FAILED", attempts=attempts,
                                previous_status=previous_status,
                                error=str(e), duration_ms=meta["duration_ms"])
@@ -2307,7 +2692,9 @@ def setup_login():
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        print("[错误] 未安装 Playwright，请先运行 install.bat")
+        print("[错误] 未安装 Playwright，请先运行:")
+        print("  pip install -r requirements.txt")
+        print("  playwright install chromium")
         input("按回车键退出...")
         return
 
@@ -2332,9 +2719,10 @@ def setup_login():
             print()
             input(">>> 登录完成后按回车键保存 <<<")
 
-            context.storage_state(path=str(PATHS["auth"]))
+            state = context.storage_state()
+            save_auth_state(state)
             print()
-            print("[成功] 登录状态已保存到: %s" % PATHS["auth"])
+            print("[成功] 登录状态已加密保存到: %s" % PATHS["auth_enc"])
             print()
             print("配置完成！接下来你可以：")
             print("  1. 运行 启动签到.bat 手动测试签到")
@@ -2346,13 +2734,12 @@ def setup_login():
     input("按回车键退出...")
 
 
-def check_login_status(page, logger):
+def check_login_status(page, logger, auth_state=None):
     """检查登录状态是否有效"""
-    # 先检查 auth_state.json 中 cmg_token 是否已过期
+    state = auth_state if auth_state is not None else load_auth_state()
+    # 先检查 cmg_token 是否已过期
     try:
-        with open(str(PATHS["auth"]), 'r', encoding='utf-8') as f:
-            state = json.load(f)
-        for cookie in state.get('cookies', []):
+        for cookie in (state or {}).get('cookies', []):
             if cookie.get('name') == 'cmg_token':
                 expires = cookie.get('expires', -1)
                 if expires > 0:
@@ -2369,26 +2756,30 @@ def check_login_status(page, logger):
         logger.warning("检查令牌过期时间时出错: %s", e)
 
     try:
-        goto_with_retry(page, "https://www.caimogu.cc/", logger, timeout=60000)
-        page.wait_for_timeout(2000)
+        # 个人中心只有登录后能正常访问；未登录通常会被重定向到登录页。
+        settings_url = "https://www.caimogu.cc/user/setting.html"
+        if not goto_with_retry(page, settings_url, logger, timeout=30000):
+            logger.error("个人中心页面加载失败，无法确认登录状态")
+            return False
+        page.wait_for_timeout(1000)
 
+        current_url = getattr(page, "url", "")
+        if not page_url_is_user_settings(current_url):
+            logger.warning("个人中心未正常打开，当前 URL: %s", current_url)
+            return False
+
+        # 再排除页面上仍残留登录入口的情况，作为辅助判断。
         login_links = page.query_selector_all(SELECTORS["login_link"])
         for link in login_links:
             try:
                 text = link.inner_text()
                 if "登录" in text or "登陆" in text:
+                    logger.warning("个人中心页面仍存在登录入口")
                     return False
             except Exception:
                 continue
 
-        # 登录有效，访问个人中心触发服务器刷新 token
-        try:
-            goto_with_retry(page, "https://www.caimogu.cc/user/setting.html", logger, timeout=30000)
-            page.wait_for_timeout(1000)
-            logger.info("已访问个人中心，可能刷新登录令牌")
-        except Exception:
-            pass
-
+        logger.info("已通过个人中心确认登录状态有效")
         return True
     except Exception as e:
         logger.warning("检查登录状态时出错: %s", e)
@@ -2418,7 +2809,7 @@ def run_signin():
     logger.info("时间: %s", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     logger.info("=" * 50)
 
-    if not PATHS["auth"].exists():
+    if not has_auth_state():
         logger.error("未找到登录状态文件！请先配置登录。")
         logger.error("请运行: python caimogu_signin.py --login")
         return
@@ -2426,8 +2817,8 @@ def run_signin():
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        logger.error("未安装 Playwright，请先运行 install.bat")
-        show_notification("采蘑菇签到失败", "未安装 Playwright，请先运行 install.bat")
+        logger.error("未安装 Playwright，请先运行: pip install -r requirements.txt 和 playwright install chromium")
+        show_notification("采蘑菇签到失败", "未安装 Playwright。\n\n请运行：\npip install -r requirements.txt\nplaywright install chromium")
         return
 
     reply_count = config.get("reply_count", 3)
@@ -2461,20 +2852,29 @@ def _run_signin_locked(logger, config, reply_count, headless, already_count, rem
         "ai_retry_comments": 0, "template_fallback_comments": 0,
         "fallback_reasons": {},
     }
+    auth_state = load_auth_state()
+    if not auth_state:
+        logger.error("登录状态读取失败或不存在，请重新配置登录。")
+        logger.error("请运行: python caimogu_signin.py --login")
+        show_notification("采蘑菇签到失败", "登录状态读取失败或不存在。\n\n请运行：\npython caimogu_signin.py --login")
+        return
+
     with sync_playwright() as p:
         browser, context = create_context(
-            p, headless=headless, storage_state=str(PATHS["auth"])
+            p, headless=headless, storage_state=auth_state
         )
+        login_ok = False
         try:
             page = context.new_page()
 
-            if not check_login_status(page, logger):
+            if not check_login_status(page, logger, auth_state):
                 logger.error("登录状态已失效！请重新配置登录。")
                 logger.error("请运行: python caimogu_signin.py --login")
                 show_notification("采蘑菇签到失败", "登录状态已失效！\n\n请运行以下命令重新登录：\npython caimogu_signin.py --login")
                 return
 
             logger.info("登录状态有效")
+            login_ok = True
 
             posts = get_post_list(page, config, remaining_count, logger)
             if not posts:
@@ -2525,7 +2925,12 @@ def _run_signin_locked(logger, config, reply_count, headless, already_count, rem
                                 pending_entry.get("reason", "unknown"),
                                 prior_attempts)
                     timeout = config.get("page_timeout_ms", 90000)
-                    goto_with_retry(page, post["url"], logger, timeout=timeout)
+                    pending_nav_ok = goto_with_retry(page, post["url"], logger, timeout=timeout)
+                    pending_page_url = getattr(page, "url", post["url"])
+                    if not pending_nav_ok or not page_url_matches_post_id(pending_page_url, post_id):
+                        logger.warning("[POST %s] 挂起验证页面加载失败，继续挂起避免误判", post_id)
+                        stats["skipped"] += 1
+                        continue
                     page.wait_for_timeout(3000)
                     verify_result = verify_existing_comment(page, expected, logger)
                     if verify_result is True:
@@ -2661,11 +3066,15 @@ def _run_signin_locked(logger, config, reply_count, headless, already_count, rem
             show_notification("采蘑菇签到出错", f"签到过程发生异常：{e}\n\n请查看签到日志了解详情：\n{PATHS['log']}")
         finally:
             # 保存浏览器状态（可能包含服务器刷新的 cookie，延长登录有效期）
-            try:
-                context.storage_state(path=str(PATHS["auth"]))
-                logger.info("已更新登录状态文件")
-            except Exception as e:
-                logger.warning("保存登录状态失败: %s", e)
+            if login_ok:
+                try:
+                    state = context.storage_state()
+                    save_auth_state(state)
+                    logger.info("已更新加密登录状态文件")
+                except Exception as e:
+                    logger.warning("保存登录状态失败: %s", e)
+            else:
+                logger.info("本次未验证登录状态，未覆盖已有登录状态文件")
             context.close()
             browser.close()
 
@@ -2682,8 +3091,48 @@ def show_help():
     print("用法:")
     print("  python caimogu_signin.py            执行自动签到")
     print("  python caimogu_signin.py --login    配置登录（首次使用）")
+    print("  python caimogu_signin.py --set-ai   设置 Key、接口地址与模型")
     print("  python caimogu_signin.py --test     测试评论生成效果")
     print("  python caimogu_signin.py --help     显示帮助")
+
+
+def set_ai_cli():
+    """一次设置 AI Key、OpenAI 兼容接口地址和模型名"""
+    config = load_config()
+    current_url = config.get("deepseek_base_url", DEFAULT_CONFIG["deepseek_base_url"])
+    current_model = config.get("deepseek_model", DEFAULT_CONFIG["deepseek_model"])
+
+    print("=" * 50)
+    print("  设置 AI 接口")
+    print("=" * 50)
+    print()
+    print("当前接口地址: %s" % current_url)
+    print("当前模型名:   %s" % current_model)
+    print()
+    print("请粘贴 API Key，留空则保持当前 Key。输入会显示在屏幕上。")
+    key = input("API Key: ").strip()
+
+    if key:
+        try:
+            save_api_key(key)
+            print("[成功] API Key 已加密保存到: %s" % PATHS["api_key_enc"])
+        except Exception as e:
+            print("[错误] Key 保存失败: %s" % e)
+    print()
+    base_url = input("接口地址（OpenAI 兼容，留空保持当前）: ").strip() or current_url
+    model = input("模型名（留空保持当前）: ").strip() or current_model
+
+    try:
+        config["deepseek_base_url"] = base_url
+        config["deepseek_model"] = model
+        save_json(PATHS["config"], config)
+        print("[成功] 已更新接口地址和模型：")
+        print("  deepseek_base_url = %s" % base_url)
+        print("  deepseek_model    = %s" % model)
+    except Exception as e:
+        print("[错误] 保存失败: %s" % e)
+    print()
+    input("按回车键退出...")
 
 
 def show_test_comments():
@@ -2726,7 +3175,7 @@ def show_test_comments():
             score, detail = score_comment_quality(comment, title, content)
             logger.info("评论: %s (%d字) [%s]", comment, char_count, source)
             logger.info("质量评分: %d/100 (%s)", score, detail)
-        if config.get("deepseek_api_key") and i < len(test_posts) - 1:
+        if get_api_key(config) and i < len(test_posts) - 1:
             time.sleep(2)
     logger.info("-" * 40)
     logger.info("测试完成")
@@ -2736,6 +3185,7 @@ def main():
     actions = {
         "--login": setup_login,
         "--setup": setup_login,
+        "--set-ai": set_ai_cli,
         "--test":  show_test_comments,
         "--help":  show_help,
         "-h":      show_help,

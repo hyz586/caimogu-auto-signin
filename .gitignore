@@ -1,5 +1,7 @@
 # 敏感文件 - 切勿提交
 auth_state.json
+auth_state.enc
+api_key.enc
 replied_posts.json
 signin_log.txt
 run_log.txt
@@ -24,6 +26,11 @@ dist/
 
 # Playwright browsers
 playwright-browsers/
+
+# 压缩包
+*.zip
+*.rar
+*.7z
 
 # IDE
 .vscode/
