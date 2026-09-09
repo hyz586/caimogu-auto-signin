@@ -8,6 +8,9 @@ run_log.txt
 last_command_output.txt
 signin.lock
 daily_report.json
+打赏二维码.png
+打赏二维码.jpg
+打赏二维码.jpeg
 
 # API Key 配置（每个人不同，不提交）
 config.json

@@ -5,6 +5,7 @@
 ## 功能
 
 - 自动登录采蘑菇论坛并回复帖子
+- 图形界面（GUI）：配置登录、设置 AI、签到、测试、开机自启一键操作，日志实时滚动
 - 支持 OpenAI 兼容 API 生成评论，或本地模板模式
 - 自动跳过置顶帖和水帖
 - 防重复机制：同一天多次运行不会重复回复，跨天 30 天内不重复
@@ -19,14 +20,15 @@
 
 ## Windows 日常使用
 
-首次使用按顺序操作：
+推荐使用图形界面（exe 版双击即开；源码版运行 `python caimogu_signin.py --gui`）：
 
-1. 双击 `启动签到.bat`，输入 `2`，在弹出的浏览器中手动登录采蘑菇论坛。
-2. 双击 `设置AI.bat`，按提示设置 Key、接口地址和模型；不使用 AI 可跳过。
-3. 双击 `启动签到.bat`，输入 `3`，预览评论生成效果，这一步不会实际发帖。
-4. 双击 `启动签到.bat`，输入 `1`，执行自动签到。
+1. 点击【配置登录】，在弹出的浏览器中手动登录采蘑菇论坛，登录完成后回到窗口。
+2. 点击【设置 AI】，填入 Key、接口地址和模型；不使用 AI 可跳过。
+3. 点击【测试评论】预览评论生成效果，这一步不会实际发帖。
+4. 点击【立即签到】执行自动签到，窗口下方实时滚动运行日志。
+5. 点击【开机自启】开启后，开机时自动在后台完成签到，不弹窗口。
 
-确认没问题后，双击 `设置开机自启.bat` 即可开机后台自动签到；双击 `取消开机自启.bat` 可取消。
+以上操作也都可以用命令行完成，见下文。
 
 ## 环境要求与安装
 
@@ -47,9 +49,11 @@ playwright install chromium
 
 ```powershell
 python caimogu_signin.py             # 执行自动签到
+python caimogu_signin.py --gui       # 启动图形界面
 python caimogu_signin.py --login     # 配置登录
 python caimogu_signin.py --set-ai    # 设置 Key、接口地址与模型
 python caimogu_signin.py --test      # 测试评论生成效果，不会实际发帖
+python caimogu_signin.py --auto      # 后台静默签到（开机自启调用）
 python caimogu_signin.py --help      # 显示帮助
 ```
 
@@ -208,14 +212,11 @@ playwright install chromium
 
 ## Windows 免安装版
 
-不使用 Python 的用户可以运行 `dist\caimogu-auto-signin.exe`。使用方式与源码版一致：
+不使用 Python 的用户直接双击 `caimogu-auto-signin.exe` 打开图形界面，按界面按钮操作即可（首次使用：配置登录 → 设置 AI（可选）→ 立即签到）。
 
-```powershell
-.\dist\caimogu-auto-signin.exe
-.\dist\caimogu-auto-signin.exe --login
-.\dist\caimogu-auto-signin.exe --set-ai
-.\dist\caimogu-auto-signin.exe --test
-```
+在 exe 所在目录放置 `打赏二维码.png`，界面右上角会显示收款码。
+
+命令行参数在 exe 上同样可用（`--login`、`--set-ai`、`--test`、`--auto` 等）。
 
 ## 免责声明
 

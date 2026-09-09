@@ -748,7 +748,7 @@ check("记录 error=too_similar", rec.get("status") == "FAILED" and rec.get("err
 # ============================================================
 print("\n== 14. 状态机与版本 ==")
 check("POST_STATUS 包含 PENDING_VERIFY", "PENDING_VERIFY" in cs.POST_STATUS)
-check("版本号为 3.4.0", cs.VERSION == "3.4.0", f"got {cs.VERSION}")
+check("版本号为 3.5.0", cs.VERSION == "3.5.0", f"got {cs.VERSION}")
 check("通用模板九类齐全",
       set(cs._REPLY_TEMPLATES_GENERIC.keys()) == set(cs._REPLY_TEMPLATES.keys()),
       f"got {sorted(cs._REPLY_TEMPLATES_GENERIC.keys())}")
@@ -910,6 +910,70 @@ check("两次点击都失败时不触发第三次点击",
       p3.click_count == 2, f"clicks={p3.click_count}")
 
 # ============================================================
+# ============================================================
+# 27. V3.5: GUI 辅助逻辑（开机自启 / 令牌到期 / 日志队列）
+# ============================================================
+print("\n== 27. V3.5: GUI 辅助逻辑 ==")
+
+import os
+from datetime import datetime as _dt27
+
+_tmp_appdata27 = tempfile.mkdtemp()
+_old_appdata27 = os.environ.get("APPDATA")
+os.environ["APPDATA"] = _tmp_appdata27
+try:
+    check("开机自启默认未开启", cs.autostart_enabled() is False)
+    ok = cs.set_autostart(True)
+    check("设置开机自启成功", ok is True and cs.autostart_enabled() is True)
+    _vbs27 = cs.autostart_vbs_path()
+    check("VBS 路径位于 Startup 目录", "Startup" in str(_vbs27))
+    _content27 = open(_vbs27, encoding="gb18030").read()
+    check("VBS 以 --auto 后台模式启动",
+          "--auto" in _content27 and ", 0, False" in _content27, _content27)
+    check("VBS 指向 python 与脚本",
+          "python" in _content27.lower() and "caimogu_signin.py" in _content27,
+          _content27)
+    check("VBS 设置工作目录", "CurrentDirectory" in _content27)
+    ok = cs.set_autostart(False)
+    check("取消开机自启成功", ok is True and cs.autostart_enabled() is False)
+    check("重复取消不报错", cs.set_autostart(False) is True)
+finally:
+    if _old_appdata27 is None:
+        os.environ.pop("APPDATA", None)
+    else:
+        os.environ["APPDATA"] = _old_appdata27
+
+_orig_load27 = cs.load_auth_state
+try:
+    cs.load_auth_state = lambda: None
+    check("无登录状态时令牌到期返回 None", cs.token_expiry_text() is None)
+    cs.load_auth_state = lambda: {"cookies": [
+        {"name": "cmg_token", "expires": 1900000000},
+        {"name": "CAIMOGU", "expires": 0},
+    ]}
+    _exp27 = cs.token_expiry_text()
+    _want27 = _dt27.fromtimestamp(1900000000).strftime("%Y-%m-%d %H:%M")
+    check("令牌到期返回时间文本", _exp27 == _want27, f"{_exp27} != {_want27}")
+    cs.load_auth_state = lambda: {"cookies": [{"name": "x"}]}
+    check("无 expires 字段时返回 None", cs.token_expiry_text() is None)
+finally:
+    cs.load_auth_state = _orig_load27
+
+# GUI 队列与状态文本（不启动界面）
+_gui27 = cs.CaimoguGUI.__new__(cs.CaimoguGUI)
+_gui27.log_queue = cs.queue.Queue()
+_gui27._gui_log("你好")
+_item27 = _gui27.log_queue.get_nowait()
+check("GUI 日志队列写入", "你好" in _item27 and "  " in _item27, _item27)
+_st27 = _gui27._status_text()
+check("状态栏含登录与 AI 信息", ("登录" in _st27 and "AI" in _st27), _st27)
+check("收款码文件名列表含 jpg", "打赏二维码.jpg" in cs.CaimoguGUI.QR_FILES)
+check("无收款码文件时优雅降级（源码版不带个人二维码）",
+      _gui27._load_qr_image() is None)
+check("GUI 入口函数存在", callable(cs.launch_gui))
+check("customtkinter 未在模块级导入（CLI 用户无需安装）",
+      "customtkinter" not in getattr(cs, "__dict__", {}))
+
 print("\n" + "=" * 50)
 print(f"结果: {len(PASS)} 通过, {len(FAIL)} 失败")
 if FAIL:

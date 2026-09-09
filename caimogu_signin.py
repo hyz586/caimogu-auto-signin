@@ -5,10 +5,14 @@
 功能：每天自动在指定圈子板块回复若干帖子，获取活跃度
 
 用法：
-  python caimogu_signin.py            执行自动签到
-  python caimogu_signin.py --login    配置登录（首次使用）
+  python caimogu_signin.py            执行自动签到（源码版默认）
+  python caimogu_signin.py --gui      打开图形界面（源码版）
+  python caimogu_signin.py --auto     执行自动签到（开机自启后台模式）
+  python caimogu_signin.py --login    配置登录（控制台流程）
+  python caimogu_signin.py --set-ai   设置 Key、接口地址与模型（控制台流程）
   python caimogu_signin.py --test     测试评论生成效果
   python caimogu_signin.py --help     显示帮助
+  exe 双击                           直接打开图形界面（打包版）
 """
 
 import json
@@ -18,6 +22,8 @@ import random
 import time
 import sys
 import logging
+import queue
+import threading
 import ctypes
 from ctypes import wintypes
 from urllib.parse import urlsplit
@@ -33,7 +39,7 @@ except ImportError:
 #  1. 路径与常量
 # ============================================================
 
-VERSION = "3.4.0"
+VERSION = "3.5.0"
 
 if getattr(sys, "frozen", False):
     SCRIPT_DIR = Path(sys.executable).parent.absolute()
@@ -3086,14 +3092,19 @@ def _run_signin_locked(logger, config, reply_count, headless, already_count, rem
 
 def show_help():
     """显示帮助信息"""
-    print("采蘑菇论坛自动签到脚本")
+    print("采蘑菇论坛自动签到脚本 V" + VERSION)
     print()
     print("用法:")
-    print("  python caimogu_signin.py            执行自动签到")
-    print("  python caimogu_signin.py --login    配置登录（首次使用）")
+    print("  python caimogu_signin.py            执行自动签到（源码版默认）")
+    print("  python caimogu_signin.py --gui      打开图形界面")
+    print("  python caimogu_signin.py --auto     执行自动签到（开机自启后台模式）")
+    print("  python caimogu_signin.py --login    配置登录（控制台流程）")
     print("  python caimogu_signin.py --set-ai   设置 Key、接口地址与模型")
     print("  python caimogu_signin.py --test     测试评论生成效果")
     print("  python caimogu_signin.py --help     显示帮助")
+    if getattr(sys, "frozen", False):
+        print()
+        print("提示：双击本程序可直接打开图形界面")
 
 
 def set_ai_cli():
@@ -3181,6 +3192,446 @@ def show_test_comments():
     logger.info("测试完成")
 
 
+# ============================================================
+#  12. V3.5.0 GUI（CustomTkinter）
+# ============================================================
+
+AUTOSTART_VBS_NAME = "caimogu_signin.vbs"
+
+
+def autostart_vbs_path():
+    base = os.environ.get("APPDATA", "")
+    return (Path(base) / "Microsoft" / "Windows" / "Start Menu"
+            / "Programs" / "Startup" / AUTOSTART_VBS_NAME)
+
+
+def set_autostart(enable):
+    """设置/取消开机自启（写 VBS 到 Startup 目录，后台 --auto 模式）"""
+    vbs = autostart_vbs_path()
+    if not enable:
+        try:
+            vbs.unlink(missing_ok=True)
+            return True
+        except OSError:
+            return False
+    if getattr(sys, "frozen", False):
+        run_line = 'WshShell.Run """%s"" --auto", 0, False' % sys.executable
+    else:
+        run_line = 'WshShell.Run """%s"" """%s"" --auto", 0, False' % (
+            sys.executable, Path(__file__))
+    try:
+        vbs.parent.mkdir(parents=True, exist_ok=True)
+        with open(vbs, "w", encoding="gb18030") as f:
+            f.write('Set WshShell = CreateObject("WScript.Shell")\n')
+            f.write('WshShell.CurrentDirectory = "%s"\n' % SCRIPT_DIR)
+            f.write(run_line + "\n")
+        return vbs.exists()
+    except OSError:
+        return False
+
+
+def autostart_enabled():
+    return autostart_vbs_path().exists()
+
+
+def token_expiry_text():
+    """从加密登录状态里取最远的 Cookie 过期时间，无则返回 None"""
+    state = load_auth_state()
+    if not state:
+        return None
+    exps = [c.get("expires", 0) for c in state.get("cookies", [])
+            if isinstance(c, dict) and c.get("expires")]
+    if not exps:
+        return None
+    return datetime.fromtimestamp(max(exps)).strftime("%Y-%m-%d %H:%M")
+
+
+def launch_gui():
+    """启动图形界面；未安装 customtkinter 时用系统弹窗提示"""
+    try:
+        import customtkinter as ctk
+    except ImportError:
+        import tkinter as tk
+        from tkinter import messagebox
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(
+            "缺少依赖",
+            "未安装 customtkinter，请先运行：\n\npip install customtkinter")
+        root.destroy()
+        return
+    CaimoguGUI(ctk).run()
+
+
+class CaimoguGUI:
+    WINDOW_SIZE = (980, 620)
+    QR_SIZE = 125
+    QR_FILES = ("打赏二维码.png", "打赏二维码.jpg", "打赏二维码.jpeg")
+
+    def __init__(self, ctk):
+        self.ctk = ctk
+        self.root = ctk.CTk()
+        self.worker = None
+        self.worker_name = ""
+        self.login_event = threading.Event()
+        self.log_queue = queue.Queue()
+        self.log_handler = None
+        self.buttons = {}
+        self._closing = False
+        self._build_window()
+        self._build_header()
+        self._build_buttons()
+        self._build_log()
+        self._attach_log_handler()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.after(200, self._poll_log)
+
+    # ---------- 界面搭建 ----------
+
+    def _build_window(self):
+        ctk = self.ctk
+        ctk.set_appearance_mode("dark")
+        ctk.set_default_color_theme("blue")
+        self.root.title("采蘑菇自动签到机 V" + VERSION)
+        self.root.geometry("%dx%d" % self.WINDOW_SIZE)
+        self.root.minsize(880, 560)
+        self.root.grid_columnconfigure(0, weight=1)
+        self.root.grid_rowconfigure(2, weight=1)
+
+    def _build_header(self):
+        ctk = self.ctk
+        header = ctk.CTkFrame(self.root, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", padx=18, pady=(16, 2))
+        header.grid_columnconfigure(0, weight=1)
+
+        left = ctk.CTkFrame(header, fg_color="transparent")
+        left.grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(left, text="采蘑菇自动签到机",
+                     font=ctk.CTkFont(size=26, weight="bold")).pack(anchor="w")
+        ctk.CTkLabel(left, text="V" + VERSION + " ｜ 每天自动回帖完成签到",
+                     font=ctk.CTkFont(size=13),
+                     text_color="gray60").pack(anchor="w")
+        self.status_label = ctk.CTkLabel(
+            left, text=self._status_text(), font=ctk.CTkFont(size=13),
+            justify="left", anchor="w")
+        self.status_label.pack(anchor="w", pady=(10, 0))
+
+        qr = ctk.CTkFrame(header, fg_color="transparent")
+        qr.grid(row=0, column=1, sticky="ne")
+        img = self._load_qr_image()
+        if img is not None:
+            ctk.CTkLabel(qr, image=img, text="").pack()
+        else:
+            ph = ctk.CTkFrame(qr, width=self.QR_SIZE, height=self.QR_SIZE,
+                              corner_radius=8, border_width=2,
+                              border_color="gray40")
+            ph.pack()
+            ph.pack_propagate(False)
+            ctk.CTkLabel(ph, text="打赏二维码\n\n放置图片文件：\n打赏二维码.png",
+                         font=ctk.CTkFont(size=9), text_color="gray60",
+                         justify="center").place(relx=0.5, rely=0.5,
+                                                  anchor="center")
+        ctk.CTkLabel(qr, text="请作者喝一杯奶茶",
+                     font=ctk.CTkFont(size=12, weight="bold")
+                     ).pack(pady=(5, 0))
+
+    def _build_buttons(self):
+        ctk = self.ctk
+        bar = ctk.CTkFrame(self.root, fg_color="transparent")
+        bar.grid(row=1, column=0, sticky="ew", padx=18, pady=12)
+        for i in range(5):
+            bar.grid_columnconfigure(i, weight=1, uniform="btn")
+        items = [
+            ("signin", "立即签到", self._start_signin),
+            ("login", "配置登录", self._start_login),
+            ("ai", "设置 AI", self._open_ai_dialog),
+            ("test", "测试评论", self._start_test),
+            ("auto", "开机自启", self._toggle_autostart),
+        ]
+        for i, (key, text, cmd) in enumerate(items):
+            b = ctk.CTkButton(bar, text=text, height=44,
+                              font=ctk.CTkFont(size=15), command=cmd)
+            b.grid(row=0, column=i, sticky="ew", padx=4)
+            self.buttons[key] = b
+        self._refresh_autostart_btn()
+
+    def _build_log(self):
+        ctk = self.ctk
+        frame = ctk.CTkFrame(self.root)
+        frame.grid(row=2, column=0, sticky="nsew", padx=18, pady=(2, 14))
+        frame.grid_rowconfigure(1, weight=1)
+        frame.grid_columnconfigure(0, weight=1)
+        bar = ctk.CTkFrame(frame, fg_color="transparent")
+        bar.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 0))
+        ctk.CTkLabel(bar, text="运行日志",
+                     font=ctk.CTkFont(size=13, weight="bold")).pack(side="left")
+        ctk.CTkButton(bar, text="打开完整日志", width=100, height=26,
+                      font=ctk.CTkFont(size=12),
+                      command=self._open_log_file).pack(side="right")
+        self.log_box = ctk.CTkTextbox(frame, font=ctk.CTkFont(size=13),
+                                      wrap="word")
+        self.log_box.grid(row=1, column=0, sticky="nsew", padx=10, pady=(6, 10))
+        self.log_box.configure(state="disabled")
+
+    # ---------- 工具 ----------
+
+    def _after(self, ms, fn):
+        """线程安全版的 after：窗口销毁后静默失败"""
+        try:
+            self.root.after(ms, fn)
+        except Exception:
+            pass
+
+    def _gui_log(self, msg):
+        self.log_queue.put("%s  %s" % (time.strftime("%H:%M:%S"), msg))
+
+    def _poll_log(self):
+        while True:
+            try:
+                item = self.log_queue.get_nowait()
+            except queue.Empty:
+                break
+            if isinstance(item, str):
+                line = item
+            else:  # logging.LogRecord（来自 QueueHandler）
+                line = "%s  %s" % (
+                    time.strftime("%H:%M:%S", time.localtime(item.created)),
+                    item.getMessage())
+            self._append_log(line)
+        self.root.after(200, self._poll_log)
+
+    def _append_log(self, line):
+        self.log_box.configure(state="normal")
+        self.log_box.insert("end", line + "\n")
+        if int(self.log_box.index("end-1c").split(".")[0]) > 2000:
+            self.log_box.delete("1.0", "200.0")
+        self.log_box.configure(state="disabled")
+        self.log_box.see("end")
+
+    def _attach_log_handler(self):
+        import logging.handlers
+        setup_logging()  # 先确保文件/控制台 handler 就位，避免重复添加
+        h = logging.handlers.QueueHandler(self.log_queue)
+        h.setLevel(logging.INFO)
+        logging.getLogger("caimogu").addHandler(h)
+        self.log_handler = h
+
+    def _load_qr_image(self):
+        try:
+            from PIL import Image
+        except ImportError:
+            return None
+        for name in self.QR_FILES:
+            p = SCRIPT_DIR / name
+            if p.exists():
+                try:
+                    img = Image.open(p)
+                    img.load()
+                    return self.ctk.CTkImage(
+                        light_image=img, dark_image=img,
+                        size=(self.QR_SIZE, self.QR_SIZE))
+                except Exception:
+                    return None
+        return None
+
+    def _open_log_file(self):
+        log_path = PATHS["log"]
+        if log_path.exists():
+            os.startfile(str(log_path))
+
+    def _status_text(self):
+        try:
+            cfg = load_config()
+        except Exception:
+            cfg = {}
+        parts = []
+        if has_auth_state():
+            exp = token_expiry_text()
+            parts.append("登录：已配置" + (("（令牌至 %s）" % exp) if exp else ""))
+        else:
+            parts.append("登录：未配置，请先点【配置登录】")
+        parts.append("每日回复：%s 条" % cfg.get("reply_count", 3))
+        try:
+            ai = "已启用" if get_api_key(cfg) else "未启用（模板模式）"
+        except Exception:
+            ai = "未启用（模板模式）"
+        parts.append("AI：" + ai)
+        return "\n".join(parts)
+
+    def _refresh_status(self):
+        self.status_label.configure(text=self._status_text())
+
+    def _refresh_autostart_btn(self):
+        text = "开机自启：已开启" if autostart_enabled() else "开机自启：未设置"
+        self.buttons["auto"].configure(text=text)
+
+    def _button_default_color(self):
+        try:
+            return self.ctk.ThemeManager.theme["CTkButton"]["fg_color"]
+        except Exception:
+            return "#1f6aa5"
+
+    # ---------- 任务调度 ----------
+
+    def _set_busy(self, busy, name=""):
+        self.worker_name = name if busy else ""
+        for b in self.buttons.values():
+            b.configure(state="disabled" if busy else "normal")
+        if not busy:
+            self._refresh_autostart_btn()
+            self._refresh_status()
+
+    def _run_worker(self, name, target):
+        if self.worker and self.worker.is_alive():
+            self._gui_log("[提示] 已有任务在运行：%s，请稍候" % self.worker_name)
+            return
+        self._set_busy(True, name)
+        self._gui_log("—— 开始：%s ——" % name)
+
+        def wrap():
+            try:
+                target()
+                self._gui_log("—— 完成：%s ——" % name)
+            except Exception as e:
+                self._gui_log("[错误] %s 失败：%s" % (name, e))
+            finally:
+                self._after(0, lambda: self._set_busy(False, name))
+
+        self.worker = threading.Thread(target=wrap, daemon=True)
+        self.worker.start()
+
+    # ---------- 五个按钮的动作 ----------
+
+    def _start_signin(self):
+        self._run_worker("自动签到", run_signin)
+
+    def _start_test(self):
+        self._run_worker("评论测试", show_test_comments)
+
+    def _start_login(self):
+        self._run_worker("配置登录", self._login_worker)
+
+    def _login_worker(self):
+        from playwright.sync_api import sync_playwright
+        self._gui_log("正在打开浏览器，请稍候...")
+        with sync_playwright() as p:
+            browser, context = create_context(p, headless=False)
+            try:
+                page = context.new_page()
+                page.goto("https://www.caimogu.cc/login.html")
+                self.login_event.clear()
+                self._after(0, self._show_login_save_mode)
+                self._gui_log("浏览器已打开登录页，请手动登录（手机号/微信/Apple 均可）")
+                self._gui_log("登录成功后，点击本窗口中的【已登录，保存状态】按钮")
+                self.login_event.wait()
+                if self._closing:
+                    return
+                state = context.storage_state()
+                save_auth_state(state)
+                self._gui_log("[成功] 登录状态已加密保存到 auth_state.enc")
+                self._after(0, self._refresh_status)
+            finally:
+                context.close()
+                browser.close()
+                self._after(0, self._show_login_normal_mode)
+
+    def _show_login_save_mode(self):
+        b = self.buttons["login"]
+        b.configure(text="已登录，保存状态", state="normal",
+                    fg_color="#2ea043", command=self._save_login)
+
+    def _save_login(self):
+        self.login_event.set()
+
+    def _show_login_normal_mode(self):
+        b = self.buttons["login"]
+        b.configure(text="配置登录", fg_color=self._button_default_color(),
+                    command=self._start_login)
+
+    def _open_ai_dialog(self):
+        ctk = self.ctk
+        cfg = load_config()
+        win = ctk.CTkToplevel(self.root)
+        win.title("设置 AI 接口")
+        win.geometry("480x400")
+        win.transient(self.root)
+        win.grab_set()
+        ctk.CTkLabel(win, text="AI 评论设置",
+                     font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(18, 6))
+        ctk.CTkLabel(win, text="留空表示保持不变；不想用 AI 可全部留空",
+                     font=ctk.CTkFont(size=12),
+                     text_color="gray60").pack()
+        form = ctk.CTkFrame(win, fg_color="transparent")
+        form.pack(fill="both", expand=True, padx=28, pady=8)
+        entries = {}
+        fields = (
+            ("key", "API Key（粘贴后自动加密保存）", "*", ""),
+            ("url", "接口地址（OpenAI 兼容）", None,
+             cfg.get("deepseek_base_url", DEFAULT_CONFIG["deepseek_base_url"])),
+            ("model", "模型名", None,
+             cfg.get("deepseek_model", DEFAULT_CONFIG["deepseek_model"])),
+        )
+        for key, label, show, prefill in fields:
+            ctk.CTkLabel(form, text=label, font=ctk.CTkFont(size=13),
+                         anchor="w").pack(fill="x", pady=(10, 2))
+            e = ctk.CTkEntry(form, show=show, font=ctk.CTkFont(size=13))
+            e.insert(0, prefill)
+            e.pack(fill="x")
+            entries[key] = e
+
+        def save():
+            try:
+                key = entries["key"].get().strip()
+                if key:
+                    save_api_key(key)
+                cfg["deepseek_base_url"] = (
+                    entries["url"].get().strip()
+                    or cfg.get("deepseek_base_url",
+                               DEFAULT_CONFIG["deepseek_base_url"]))
+                cfg["deepseek_model"] = (
+                    entries["model"].get().strip()
+                    or cfg.get("deepseek_model",
+                               DEFAULT_CONFIG["deepseek_model"]))
+                save_json(PATHS["config"], cfg)
+                self._gui_log("[成功] AI 设置已保存")
+                self._refresh_status()
+                win.destroy()
+            except Exception as ex:
+                self._gui_log("[错误] AI 设置保存失败：%s" % ex)
+
+        ctk.CTkButton(win, text="保存", width=120, height=34,
+                      command=save).pack(pady=(6, 16))
+
+    def _toggle_autostart(self):
+        enable = not autostart_enabled()
+        ok = set_autostart(enable)
+        if ok:
+            self._gui_log("[成功] 已%s开机自启" % ("设置" if enable else "取消"))
+        else:
+            self._gui_log("[失败] 开机自启设置失败，请检查权限")
+        self._refresh_autostart_btn()
+
+    # ---------- 生命周期 ----------
+
+    def _on_close(self):
+        if self.worker and self.worker.is_alive():
+            from tkinter import messagebox
+            if not messagebox.askyesno("退出确认",
+                                       "有任务正在运行，确定要退出吗？"):
+                return
+        self._closing = True
+        self.login_event.set()
+        if self.log_handler is not None:
+            try:
+                logging.getLogger("caimogu").removeHandler(self.log_handler)
+            except Exception:
+                pass
+        self.root.destroy()
+
+    def run(self):
+        self.root.mainloop()
+
+
 def main():
     actions = {
         "--login": setup_login,
@@ -3189,9 +3640,16 @@ def main():
         "--test":  show_test_comments,
         "--help":  show_help,
         "-h":      show_help,
+        "--auto":  run_signin,
+        "--gui":   launch_gui,
     }
+    argv = sys.argv[1:]
+    # 打包版双击直接进 GUI；源码版默认行为保持控制台签到
+    if not argv and getattr(sys, "frozen", False):
+        launch_gui()
+        return
     action = next(
-        (actions[arg] for arg in sys.argv[1:] if arg in actions),
+        (actions[arg] for arg in argv if arg in actions),
         run_signin,
     )
     action()
