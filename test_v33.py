@@ -23,6 +23,7 @@ cs.SCRIPT_DIR = TMP  # 让 daily_report.json 写入临时目录
 cs.PATHS["api_key_enc"] = TMP / "api_key.enc"
 cs.PATHS["auth_enc"] = TMP / "auth_state.enc"
 cs.PATHS["auth"] = TMP / "auth_state.json"
+cs.PATHS["config"] = TMP / "config.json"  # 迁移测试会触发 save_json，绝不能写真实配置
 
 ORIG_GENERATE_COMMENT = cs.generate_comment  # 第4-7节会 mock，第9节需调用原函数
 ORIG_GENERATE_TEMPLATE = cs.generate_comment_template  # 第10节起会 mock，gamma 节需调用原函数
@@ -312,14 +313,14 @@ def mock_api(responses):
             item = seq.pop(0)
             if isinstance(item, Exception):
                 raise item
-            return item, "deepseek-test"
+            return item, "ai-api-test"
         raise RuntimeError("no more mock responses")
     return fake
 
 cs.generate_comment_template = lambda title, content: "模板兜底评论"
 
 # 10.1 首次直接成功
-cs._call_deepseek_api = mock_api([VALID_COMMENT])
+cs._call_ai_api = mock_api([VALID_COMMENT])
 gen = cs.generate_comment_ai("标题", "正文", "key", None, None)
 check("首次成功 -> source=ai, attempts=1",
       gen["source"] == "ai" and gen["comment"] == VALID_COMMENT
@@ -327,7 +328,7 @@ check("首次成功 -> source=ai, attempts=1",
       f"got {gen}")
 
 # 10.2 空返回 -> 重试成功 -> ai_retry
-cs._call_deepseek_api = mock_api(["", VALID_COMMENT])
+cs._call_ai_api = mock_api(["", VALID_COMMENT])
 gen = cs.generate_comment_ai("标题", "正文", "key", None, None)
 check("空返回重试成功 -> source=ai_retry, attempts=2",
       gen["source"] == "ai_retry" and gen["comment"] == VALID_COMMENT
@@ -335,7 +336,7 @@ check("空返回重试成功 -> source=ai_retry, attempts=2",
       f"got {gen}")
 
 # 10.3 两次空返回 -> template_fallback + empty_response
-cs._call_deepseek_api = mock_api(["", ""])
+cs._call_ai_api = mock_api(["", ""])
 gen = cs.generate_comment_ai("标题", "正文", "key", None, None)
 check("两次空返回 -> template_fallback/empty_response, attempts=2",
       gen["source"] == "template_fallback" and gen["comment"] == "模板兜底评论"
@@ -344,27 +345,27 @@ check("两次空返回 -> template_fallback/empty_response, attempts=2",
       f"got {gen}")
 
 # 10.4 gamma 后 41 字放行直出（8/30 曾被 40 上限误杀）；>55 字仍 invalid_length
-cs._call_deepseek_api = mock_api([LONG_COMMENT])
+cs._call_ai_api = mock_api([LONG_COMMENT])
 gen = cs.generate_comment_ai("标题", "正文", "key", None, None)
 check(f"41 字评论（{cs._comment_len(LONG_COMMENT)}字）gamma 后直出不再误杀",
       gen["source"] == "ai" and gen["fallback"] is False and gen["comment"] == LONG_COMMENT,
       f"got {gen}")
 OVER55 = "XSX补丁快15G，PS5才1.5G，这怕不是把整个加勒比海底都重新渲染了一遍吧，毛茸茸朋友可别是只巨蜥，到时候藏身处直接变动物园了"
-cs._call_deepseek_api = mock_api([OVER55])
+cs._call_ai_api = mock_api([OVER55])
 gen = cs.generate_comment_ai("标题", "正文", "key", None, None)
 check(f"超长({cs._comment_len(OVER55)}字) -> invalid_length",
       gen["source"] == "template_fallback" and gen["fallback_reason"] == "invalid_length"
       and gen["ai_attempts"] == 1, f"got {gen}")
 
 # 10.5 含硬禁词 -> banned_phrase
-cs._call_deepseek_api = mock_api([BANNED_COMMENT])
+cs._call_ai_api = mock_api([BANNED_COMMENT])
 gen = cs.generate_comment_ai("标题", "正文", "key", None, None)
 check("含硬禁词 -> banned_phrase",
       gen["source"] == "template_fallback" and gen["fallback_reason"] == "banned_phrase",
       f"got {gen}")
 
 # 10.6 SKIP
-cs._call_deepseek_api = mock_api(["SKIP"])
+cs._call_ai_api = mock_api(["SKIP"])
 gen = cs.generate_comment_ai("标题", "正文", "key", None, None)
 check("AI 判定 SKIP -> comment=SKIP, source=ai, 不算 fallback",
       gen["comment"] == "SKIP" and gen["source"] == "ai" and gen["fallback"] is False,
@@ -377,7 +378,7 @@ print("\n== 11. beta: API 异常分类 ==")
 import requests
 from types import SimpleNamespace
 
-cs._call_deepseek_api = mock_api([requests.exceptions.ConnectionError("conn refused")])
+cs._call_ai_api = mock_api([requests.exceptions.ConnectionError("conn refused")])
 gen = cs.generate_comment_ai("标题", "正文", "key", None, None)
 check("连接错误 -> network_error",
       gen["fallback_reason"] == "network_error" and gen["source"] == "template_fallback",
@@ -385,17 +386,17 @@ check("连接错误 -> network_error",
 
 e429 = requests.exceptions.HTTPError("429")
 e429.response = SimpleNamespace(status_code=429)
-cs._call_deepseek_api = mock_api([e429])
+cs._call_ai_api = mock_api([e429])
 gen = cs.generate_comment_ai("标题", "正文", "key", None, None)
 check("HTTP 429 -> 429", gen["fallback_reason"] == "429", f"got {gen}")
 
 e401 = requests.exceptions.HTTPError("401")
 e401.response = SimpleNamespace(status_code=401)
-cs._call_deepseek_api = mock_api([e401])
+cs._call_ai_api = mock_api([e401])
 gen = cs.generate_comment_ai("标题", "正文", "key", None, None)
 check("HTTP 401 -> http_error", gen["fallback_reason"] == "http_error", f"got {gen}")
 
-cs._call_deepseek_api = mock_api([ValueError("boom")])
+cs._call_ai_api = mock_api([ValueError("boom")])
 gen = cs.generate_comment_ai("标题", "正文", "key", None, None)
 check("其他异常 -> exception", gen["fallback_reason"] == "exception", f"got {gen}")
 
@@ -481,7 +482,7 @@ check("55 字边界通过", cs._is_reply_valid("字" * 55, "标题", "正文"))
 check("56 字仍拒绝", not cs._is_reply_valid("字" * 56, "标题", "正文"))
 check("14 字仍拒绝", not cs._is_reply_valid("字" * 14, "标题", "正文"))
 
-cs._call_deepseek_api = mock_api([C42])
+cs._call_ai_api = mock_api([C42])
 gen = cs.generate_comment_ai("标题", "正文", "key", None, None)
 check("42 字真实案例走 AI 直出（不再 fallback）",
       gen["source"] == "ai" and gen["comment"] == C42 and gen["fallback"] is False,
@@ -508,7 +509,7 @@ check("完整句不误判：34字真实案例",
       not cs._has_incomplete_ending("骑马过河的时候不会被淹死吧？之前测试版掉水里挣扎半天，希望坐骑别也这么憨"))
 
 DANGLER = "这游戏要是能把手感做好，销量肯定不会差，毕竟"
-cs._call_deepseek_api = mock_api([DANGLER])
+cs._call_ai_api = mock_api([DANGLER])
 gen = cs.generate_comment_ai("标题", "正文", "key", None, None)
 check("残句回退模板，fallback_reason=incomplete_ending",
       gen["source"] == "template_fallback" and gen["fallback_reason"] == "incomplete_ending",
@@ -748,7 +749,7 @@ check("记录 error=too_similar", rec.get("status") == "FAILED" and rec.get("err
 # ============================================================
 print("\n== 14. 状态机与版本 ==")
 check("POST_STATUS 包含 PENDING_VERIFY", "PENDING_VERIFY" in cs.POST_STATUS)
-check("版本号为 3.5.0", cs.VERSION == "3.5.0", f"got {cs.VERSION}")
+check("版本号为 3.5.1", cs.VERSION == "3.5.1", f"got {cs.VERSION}")
 check("通用模板九类齐全",
       set(cs._REPLY_TEMPLATES_GENERIC.keys()) == set(cs._REPLY_TEMPLATES.keys()),
       f"got {sorted(cs._REPLY_TEMPLATES_GENERIC.keys())}")
@@ -973,6 +974,150 @@ check("无收款码文件时优雅降级（源码版不带个人二维码）",
 check("GUI 入口函数存在", callable(cs.launch_gui))
 check("customtkinter 未在模块级导入（CLI 用户无需安装）",
       "customtkinter" not in getattr(cs, "__dict__", {}))
+
+# ============================================================
+# 28. V3.5.1: 细节词边界 + 低相关兜底 + 水贴审核框
+# ============================================================
+print("\n== 28. V3.5.1: 细节词边界与水贴审核框 ==")
+
+# --- A1: 词边界感知截断（用户实测：{2,8} 正则把"动作游戏"截成"动作游"）---
+_d28 = cs._extract_detail("小林裕幸新作上手体验", "这款脑洞大开的动作游戏确实少见")
+check("词边界截断：长片段在虚词处切分产出完整词", _d28 == "动作游戏", f"got {_d28!r}")
+
+_d28b = cs._extract_detail("", "根据成就推测可能是泄露内容")
+check("细节尾部情态词被剥离", _d28b == "根据成就推测", f"got {_d28b!r}")
+
+_d28c = cs._extract_detail("", "沙盒模式完全自由，建造随心")
+check("8 字以内完整片段原样保留", _d28c == "沙盒模式完全自由", f"got {_d28c!r}")
+
+check("指示词前缀被剥离",
+      cs._trim_detail_run("这款脑洞大开的动作游戏") in ("脑洞大开", "动作游戏"),
+      f"got {cs._trim_detail_run('这款脑洞大开的动作游戏')!r}")
+
+# --- A2: 低相关兜底（{d} 与帖子全文 2-gram 重叠不足 -> 无细节通用模板）---
+cs.generate_comment_template = ORIG_GENERATE_TEMPLATE  # 第19节 finally 后仍是 mock，先恢复
+_outs28 = {cs.generate_comment_template("存档损坏求助", "游戏存档坏了，进度全没了，怎么恢复")
+           for _ in range(20)}
+check("短细节低重叠时落回无细节通用模板",
+      all(o != "SKIP" and o in cs._REPLY_TEMPLATES_GENERIC["help"] for o in _outs28),
+      f"got {sorted(_outs28)[:2]}")
+
+_outs28b = {cs.generate_comment_template("《愚者不灭》新作上手体验",
+                                         "这款脑洞大开的动作游戏设计惊艳，操作手感流畅")
+            for _ in range(20)}
+check("高重叠细节仍填充 {d} 插槽",
+      all("动作游戏设计惊艳" in o for o in _outs28b), f"got {sorted(_outs28b)[:2]}")
+
+# --- 类别误判收紧（"砍树采集"不再触发 regret）---
+check("游戏语境砍树不再误判 regret",
+      cs.detect_title_type("《纪元117：罗马和平》休闲经营体验解析 砍树采集资源，建造罗马城") != "regret")
+check("真被砍仍识别 regret", cs.detect_title_type("期待两年的项目被砍了") == "regret")
+
+# --- B: 水贴审核确认框处理（2026-09-09 用户实测场景）---
+class _FakeSwalEl28:
+    def __init__(self, text):
+        self._text = text
+    def is_visible(self):
+        return True
+    def inner_text(self):
+        return self._text
+    def click(self, timeout=0):
+        _FakeSwalPage28.clicks += 1
+
+
+class _FakeSwalPage28:
+    clicks = 0
+    def __init__(self, swal_text=""):
+        self._swal = swal_text
+        self._confirmed = False
+    def query_selector_all(self, sel):
+        if sel == ".swal2-container .swal2-title" and self._swal:
+            return [_FakeSwalEl28(self._swal)]
+        return []
+    def query_selector(self, sel):
+        if sel == ".swal2-confirm" and self._swal:
+            return _FakeSwalEl28("继续发布")
+        return None
+    def evaluate(self, script):
+        if "__caimogu_moderation_confirmed === true" in script:
+            return self._confirmed
+        if "__caimogu_moderation_confirmed = true" in script:
+            self._confirmed = True
+        return None
+    def wait_for_timeout(self, ms):
+        pass
+
+
+_mod28 = _FakeSwalPage28(
+    "系统判断你的评论疑似水贴，需后台审核(如有影响力则会在审核通过后发放)。\n是否继续发布？")
+check("水贴审核框被识别并点击继续发布",
+      cs.handle_moderation_confirm(_mod28, lg) is True and _FakeSwalPage28.clicks == 1,
+      f"clicks={_FakeSwalPage28.clicks}")
+check("同一页面不重复点击（JS 标志位防重）",
+      cs.handle_moderation_confirm(_mod28, lg) is True and _FakeSwalPage28.clicks == 1,
+      f"clicks={_FakeSwalPage28.clicks}")
+check("普通成功提示不触发审核框处理",
+      cs.handle_moderation_confirm(_FakeSwalPage28("回复成功，积分+2"), lg) is False
+      and _FakeSwalPage28.clicks == 1)
+check("无弹窗时返回 False",
+      cs.handle_moderation_confirm(_FakeSwalPage28(""), lg) is False)
+check("审核框关键词不含错误词（不会被误判为提交失败）",
+      not any(w in "系统判断你的评论疑似水贴，需后台审核，是否继续发布" for w in
+              ("失败", "错误", "禁止", "频繁", "限制", "验证码", "未登录")))
+
+# ============================================================
+# 29. V3.5.1: 弹窗重新登录指引自适应（exe 版引导界面，源码版命令行）
+# ============================================================
+print("\n== 29. V3.5.1: 弹窗重新登录指引自适应 ==")
+check("源码版弹窗提示命令行登录",
+      "caimogu_signin.py --login" in cs._relogin_hint() and "双击" not in cs._relogin_hint(),
+      f"got {cs._relogin_hint()!r}")
+
+_frozen_saved = getattr(cs.sys, "frozen", False)
+try:
+    cs.sys.frozen = True
+    _hint29 = cs._relogin_hint()
+finally:
+    if _frozen_saved:
+        cs.sys.frozen = _frozen_saved
+    else:
+        try:
+            del cs.sys.frozen
+        except AttributeError:
+            pass
+check("exe 版弹窗提示双击打开界面点配置登录",
+      "双击" in _hint29 and "配置登录" in _hint29 and "--login" not in _hint29,
+      f"got {_hint29!r}")
+
+# ============================================================
+# 30. V3.5.1: 配置键名 deepseek_* -> ai_* 迁移与兼容
+# ============================================================
+print("\n== 30. V3.5.1: 配置键名 deepseek_* -> ai_* 迁移与兼容 ==")
+check("默认配置使用 ai_* 键名",
+      "ai_base_url" in cs.DEFAULT_CONFIG and "ai_model" in cs.DEFAULT_CONFIG
+      and "deepseek_base_url" not in cs.DEFAULT_CONFIG,
+      f"keys={sorted(k for k in cs.DEFAULT_CONFIG if 'ai' in k or 'deepseek' in k)}")
+
+_old30 = {"deepseek_base_url": "https://token.sensenova.cn/v1",
+          "deepseek_model": "deepseek-v4-flash"}
+cs._rename_legacy_ai_keys(_old30)
+check("旧 deepseek_* 键迁移到 ai_* 后旧键删除",
+      _old30.get("ai_base_url") == "https://token.sensenova.cn/v1"
+      and _old30.get("ai_model") == "deepseek-v4-flash"
+      and "deepseek_base_url" not in _old30 and "deepseek_model" not in _old30,
+      f"got {_old30}")
+
+_both30 = {"ai_base_url": "https://new.example.com/v1",
+           "deepseek_base_url": "https://old.example.com/v1"}
+cs._rename_legacy_ai_keys(_both30)
+check("新旧键并存时新键优先不被旧值覆盖",
+      _both30["ai_base_url"] == "https://new.example.com/v1",
+      f"got {_both30['ai_base_url']}")
+
+_new30 = {"circle_url": "https://www.caimogu.cc/circle/1.html"}
+cs._rename_legacy_ai_keys(_new30)
+check("无旧键时迁移函数无副作用",
+      "ai_base_url" not in _new30 and _new30["circle_url"].endswith("1.html"))
 
 print("\n" + "=" * 50)
 print(f"结果: {len(PASS)} 通过, {len(FAIL)} 失败")

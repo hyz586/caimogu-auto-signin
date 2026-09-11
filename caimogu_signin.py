@@ -39,7 +39,7 @@ except ImportError:
 #  1. 路径与常量
 # ============================================================
 
-VERSION = "3.5.0"
+VERSION = "3.5.1"
 
 if getattr(sys, "frozen", False):
     SCRIPT_DIR = Path(sys.executable).parent.absolute()
@@ -291,7 +291,8 @@ def save_api_key(api_key):
 
 
 def get_api_key(config=None):
-    env_key = os.environ.get("CAIMOGU_DEEPSEEK_API_KEY", "").strip()
+    env_key = (os.environ.get("CAIMOGU_AI_API_KEY", "")
+               or os.environ.get("CAIMOGU_DEEPSEEK_API_KEY", "")).strip()
     if env_key:
         return env_key
 
@@ -302,11 +303,13 @@ def get_api_key(config=None):
             logging.getLogger("caimogu").warning("读取加密 API Key 失败: %s", e)
             return ""
 
-    legacy = ((config or {}).get("deepseek_api_key") or "").strip()
+    legacy = ((config or {}).get("ai_api_key")
+              or (config or {}).get("deepseek_api_key") or "").strip()
     if legacy:
         try:
             save_api_key(legacy)
-            config["deepseek_api_key"] = ""
+            config["ai_api_key"] = ""
+            config.pop("deepseek_api_key", None)
             save_json(PATHS["config"], config)
         except Exception as e:
             logging.getLogger("caimogu").warning("迁移明文 API Key 失败: %s", e)
@@ -355,7 +358,8 @@ def has_auth_state():
 
 
 def _migrate_config_secret(config):
-    legacy = (config.get("deepseek_api_key") or "").strip()
+    legacy = ((config.get("ai_api_key") or "").strip()
+              or (config.get("deepseek_api_key") or "").strip())
     if not legacy:
         return
     if PATHS["api_key_enc"].exists():
@@ -366,8 +370,27 @@ def _migrate_config_secret(config):
         except Exception as e:
             logging.getLogger("caimogu").warning("加密 API Key 失败: %s", e)
             return
-    config["deepseek_api_key"] = ""
+    config["ai_api_key"] = ""
+    config.pop("deepseek_api_key", None)
     save_json(PATHS["config"], config)
+
+
+def _rename_legacy_ai_keys(config):
+    """V3.5.1: deepseek_* 旧键名迁移为 ai_*（接口本身是通用 OpenAI 兼容，不止 DeepSeek）"""
+    changed = False
+    for old_key, new_key in (("deepseek_api_key", "ai_api_key"),
+                             ("deepseek_base_url", "ai_base_url"),
+                             ("deepseek_model", "ai_model")):
+        if old_key in config:
+            if not (config.get(new_key) or "").strip():
+                config[new_key] = config.get(old_key)
+            config.pop(old_key, None)
+            changed = True
+    if changed:
+        try:
+            save_json(PATHS["config"], config)
+        except Exception as e:
+            logging.getLogger("caimogu").warning("旧键名迁移保存失败: %s", e)
 
 # 免安装版优先使用程序目录旁边的 Playwright 浏览器
 _browsers_dir = SCRIPT_DIR / "playwright-browsers"
@@ -400,9 +423,8 @@ DEFAULT_CONFIG = {
     "max_delay": 20,
     "headless": True,
     "page_timeout_ms": 90000,
-    "deepseek_api_key": "",
-    "deepseek_base_url": "https://api.deepseek.com/v1",
-    "deepseek_model": "deepseek-chat",
+    "ai_base_url": "https://api.deepseek.com/v1",
+    "ai_model": "deepseek-chat",
 }
 
 # 页面选择器集中定义（顺序敏感，勿随意调整）
@@ -802,6 +824,7 @@ def load_config():
         return config
     config.update(load_json(PATHS["config"], {}))
     config = validate_config(config)
+    _rename_legacy_ai_keys(config)
     _migrate_config_secret(config)
     return config
 
@@ -1000,7 +1023,8 @@ def _normalize_comment(text):
 
 def detect_title_type(title):
     """粗略判断帖子类型，用于生成更贴合标题的回复"""
-    if re.search(r'取消|砍|延期|跳票|停服|下架|暴死|失败|崩|凉', title):
+    # V3.5.1：砍/崩/凉收紧为词组——单字会误吞"砍树采集""崩溃求助""凉爽画风"等游戏语境
+    if re.search(r'取消|砍掉|砍了|被砍|腰斩|延期|跳票|停服|下架|暴死|失败|崩了|崩盘|凉了|凉透', title):
         return "regret"
     if re.search(r'求助|请问|有没有|怎么|如何|为啥|为什么|闪退|报错|问题|卡住', title):
         return "help"
@@ -1095,6 +1119,82 @@ def judge_replyability(title, content):
     return "SKIP"
 
 
+# ---------- V3.5.1 细节提取词边界处理 ----------
+# {d} 尾部情态/推测词：挂在细节末尾会让模板拼接语法破碎（"根据成就推测可能+如果消息属实"）
+_DETAIL_MODAL_TAILS = (
+    "可能", "应该", "估计", "也许", "大概", "恐怕", "似乎",
+    "好像", "真的", "确实", "居然", "竟然", "基本上", "差不多",
+)
+
+# 细节片段开头的指示/引用词：剥掉后才是话题本体（"这款脑洞大开的动作游戏"→"脑洞大开…"）
+_DETAIL_LEAD_STRIPS = (
+    "这款", "那款", "这个", "那个", "这种", "那种",
+    "一款", "一部", "一个", "说到", "看到", "作为", "据说", "号称",
+)
+
+# 超长片段的切分点：多字情态/连接词 + 单独的"的"。
+# 只用这些是因为单字虚词（和/就/都…）会误劈真实词：成就、和平、成都（实测踩坑）。
+# 词边界截断只允许发生在这些位置，避免 {2,8} 正则把"动作游戏"拦腰截成"动作游"。
+_DETAIL_SPLIT_WORDS = (
+    "可能", "如果", "应该", "估计", "也许", "大概", "恐怕", "似乎", "好像",
+    "而且", "但是", "不过", "所以", "然后", "或者", "以及", "因为", "虽然",
+    "要是", "万一", "居然", "竟然", "真的", "确实",
+)
+_DETAIL_SPLIT_RE = re.compile("%s|的" % "|".join(_DETAIL_SPLIT_WORDS))
+
+# 切分后残留在段首的单字虚词（如"可能是泄露"切成"是泄露"），剥掉才是话题本体
+_DETAIL_PART_LEAD_CHARS = "的了是在和与及跟或把很都太就个"
+
+
+def _strip_detail_edges(detail):
+    """剥掉细节首部的指示词与尾部的情态词，保留至少 2 字（V3.5.1）"""
+    detail = detail or ""
+    changed = True
+    while changed and len(detail) > 2:
+        changed = False
+        for w in _DETAIL_LEAD_STRIPS:
+            if detail.startswith(w) and len(detail) - len(w) >= 2:
+                detail = detail[len(w):]
+                changed = True
+        for w in _DETAIL_MODAL_TAILS:
+            if detail.endswith(w) and len(detail) - len(w) >= 2:
+                detail = detail[:-len(w)]
+                changed = True
+    return detail
+
+
+def _strip_part_lead(part):
+    """剥掉切分段首部粘连的单字虚词（V3.5.1）"""
+    while len(part) > 2 and part[0] in _DETAIL_PART_LEAD_CHARS:
+        part = part[1:]
+    return part
+
+
+def _trim_detail_run(run, max_len=8):
+    """词边界感知截断（V3.5.1）
+
+    超过 max_len 的长片段只在情态/连接词或"的"处切分（单字虚词不切，
+    防止误劈"成就""和平"等真实词）；段首残留虚词剥掉后，取最长的段，
+    同长取末段（更接近名词性中心语）；切不出 2~max_len 的干净段则整段丢弃。
+    """
+    run = _strip_detail_edges(run or "")
+    if len(run) <= max_len:
+        return run
+    parts = []
+    for p in _DETAIL_SPLIT_RE.split(run):
+        p = _strip_part_lead(p)
+        if 2 <= len(p) <= max_len:
+            parts.append(p)
+    if not parts:
+        return ""
+    longest = max(len(p) for p in parts)
+    best = ""
+    for p in parts:
+        if len(p) == longest:
+            best = p
+    return _strip_detail_edges(best)
+
+
 def _extract_detail(title, content):
     """提取一个确实出现在标题或正文里的细节"""
     title = title or ""
@@ -1108,7 +1208,7 @@ def _extract_detail(title, content):
             return "窗口直接消失"
         if "多次" in detail and "换导演" in detail:
             return "多次换导演"
-        return detail[:10]
+        return _trim_detail_run(detail, 10)
 
     compact_content = re.sub(r'\s+', '', content)
     for pattern in _DETAIL_PATTERNS:
@@ -1121,10 +1221,16 @@ def _extract_detail(title, content):
     for sentence in sentences:
         sentence = re.sub(r'\s+', '', sentence)
         if 4 <= _meaningful_text_len(sentence) <= 40:
-            chunks.extend(re.findall(r'[\u4e00-\u9fa5A-Za-z0-9]{2,8}', sentence))
+            # V3.5.1：{2,20} 抓完整片段再词边界截断，取代 {2,8} 的拦腰硬切
+            chunks.extend(
+                _trim_detail_run(c, 8)
+                for c in re.findall(r'[\u4e00-\u9fa5A-Za-z0-9]{2,20}', sentence)
+            )
 
     scored = []
     for chunk in chunks:
+        if not chunk:
+            continue
         if any(stop in chunk for stop in _DETAIL_STOP_WORDS):
             continue
         if any(bad in chunk for bad in _HARD_BANNED_PARTS):
@@ -1138,7 +1244,7 @@ def _extract_detail(title, content):
 
     if scored:
         scored.sort(reverse=True)
-        return scored[0][1][:8]
+        return scored[0][1]
 
     compact_title = re.sub(r'\s+', '', title)
     for pattern in _DETAIL_PATTERNS:
@@ -1146,10 +1252,10 @@ def _extract_detail(title, content):
         if m:
             return clean_detail(m.group(0))
 
-    chunks = re.findall(r'[\u4e00-\u9fa5A-Za-z0-9]{2,8}', title)
-    for chunk in chunks:
-        if not any(stop in chunk for stop in _DETAIL_STOP_WORDS):
-            return chunk[:8]
+    for chunk in re.findall(r'[\u4e00-\u9fa5A-Za-z0-9]{2,20}', title):
+        trimmed = _trim_detail_run(chunk, 8)
+        if trimmed and not any(stop in trimmed for stop in _DETAIL_STOP_WORDS):
+            return trimmed
 
     segments = re.findall(r'[\u4e00-\u9fa5]{2,6}', title)
     return segments[0][:8] if segments else ""
@@ -1248,11 +1354,38 @@ def _apply_synonyms(text):
     return text
 
 
+# V3.5.1：细节可信度下限——填充后的评论与帖子全文的 2-gram 重叠率。
+# 低于该值说明 {d} 与帖子几乎不搭（截断词/错位细节），改走无细节通用模板。
+# 阈值取 0.10：低于 relevance 中档(0.15)，避免误杀 4 字细节+长模板的正常组合。
+_DETAIL_TRUST_OVERLAP = 0.10
+
+
+def _detail_comment_overlap(comment, title, content):
+    """评论与帖子全文的字符 2-gram 重叠率（V3.5.1）
+
+    口径与 score_comment_quality 的 relevance 一致，但比对全文而非
+    前 200 字：细节常出自正文深处，窄窗口会把好细节误判为不相关。
+    """
+    comment_clean = _normalize_generated_comment(comment)
+    title_chars = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9]', '', title or "")
+    content_chars = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9]', '', content or "")
+    post_text = title_chars + content_chars
+    comment_chars = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9]', '', comment_clean)
+    if len(comment_chars) < 2 or len(post_text) < 2:
+        return 0.0
+    comment_grams = set(comment_chars[i:i + 2] for i in range(len(comment_chars) - 1))
+    post_grams = set(post_text[i:i + 2] for i in range(len(post_text) - 1))
+    if not comment_grams or not post_grams:
+        return 0.0
+    return len(comment_grams & post_grams) / len(comment_grams)
+
+
 def generate_comment_template(title, content=""):
     """模板模式：先判断 REPLY/SKIP，再生成短回复
 
     V3.3-gamma：细节不可靠时改用无细节通用模板，不硬塞；
     模板已去除虚构个人经历，改为"具体对象+回应角度+观点"结构。
+    V3.5.1：细节模板候选需通过与帖子全文的重叠校验，防语义错位。
     """
     decision = judge_replyability(title, content)
     if decision == "SKIP":
@@ -1272,8 +1405,12 @@ def generate_comment_template(title, content=""):
             candidates.append(filled)
 
         valid = [c for c in candidates if _is_reply_valid(c, title, content)]
-        if valid:
-            return random.choice(valid)
+        # V3.5.1：{d} 与帖子全文重叠不足的候选视为细节不可信（截断词、
+        # 错位细节会让拼接语义破碎，被站点判为水贴），只用可信候选
+        trusted = [c for c in valid
+                   if _detail_comment_overlap(c, title, content) >= _DETAIL_TRUST_OVERLAP]
+        if trusted:
+            return random.choice(trusted)
 
     # 细节不可用或细节模板全部无效：用无细节通用模板兜底，避免生硬拼接
     generic = _REPLY_TEMPLATES_GENERIC.get(title_type, _REPLY_TEMPLATES_GENERIC["normal"])
@@ -1283,7 +1420,7 @@ def generate_comment_template(title, content=""):
     return "SKIP"
 
 
-def _call_deepseek_api(url, headers, data, logger, max_retries=3):
+def _call_ai_api(url, headers, data, logger, max_retries=3):
     """发起 API 请求，对可重试错误（429/5xx/网络超时）使用指数退避"""
     import requests
     retryable_codes = {429, 500, 502, 503, 504}
@@ -1400,7 +1537,7 @@ def generate_comment_ai(title, content, api_key, base_url, model):
         }
 
         logger.info("AI 请求: base_url=%s, model=%s", base_url, model)
-        raw_content, _ = _call_deepseek_api(url, headers, data, logger)
+        raw_content, _ = _call_ai_api(url, headers, data, logger)
         ai_attempts = 1
 
         logger.info("AI 原始返回: %s", raw_content)
@@ -1423,7 +1560,7 @@ def generate_comment_ai(title, content, api_key, base_url, model):
                 "temperature": 0.9
             }
             time.sleep(1)
-            raw_content2, _ = _call_deepseek_api(url, headers, retry_data, logger)
+            raw_content2, _ = _call_ai_api(url, headers, retry_data, logger)
             ai_attempts = 2
             logger.info("AI 重试返回: %s", raw_content2)
             comment = _normalize_generated_comment(raw_content2)
@@ -1469,8 +1606,8 @@ def generate_comment(title, content, config):
     """
     api_key = get_api_key(config)
     if api_key:
-        base_url = config.get("deepseek_base_url", "https://api.deepseek.com/v1")
-        model = config.get("deepseek_model", "deepseek-chat")
+        base_url = config.get("ai_base_url", DEFAULT_CONFIG["ai_base_url"])
+        model = config.get("ai_model", DEFAULT_CONFIG["ai_model"])
         return generate_comment_ai(title, content, api_key, base_url, model)
     return {
         "comment": generate_comment_template(title, content),
@@ -2155,6 +2292,59 @@ def get_visible_error_message(page):
     return ""
 
 
+# 水贴审核确认框特征（V3.5.1）：站点风控弹"是否继续发布"，需点击确认评论才进审核队列
+_MODERATION_PROMPT_KEYWORDS = ("疑似水贴", "后台审核", "是否继续发布")
+
+
+def _get_visible_swal_text(page):
+    """读取 SweetAlert2 弹窗的可见文本（标题或正文）"""
+    for sel in (".swal2-container .swal2-title", ".swal2-container .swal2-html-container"):
+        try:
+            for el in page.query_selector_all(sel):
+                if el.is_visible():
+                    txt = el.inner_text().strip()
+                    if txt:
+                        return txt
+        except Exception:
+            continue
+    return ""
+
+
+def handle_moderation_confirm(page, logger):
+    """处理"疑似水贴需后台审核"确认框（V3.5.1）
+
+    用户实测（2026-09-09）：站点风控弹出该确认框时旧版既不确认也不取消，
+    干等 10 秒靠刷新兜底，且每秒重复记两条日志。现检测到即点击"继续发布"，
+    让评论进入审核队列后走正常验证流程。点击只发起一次（页面 JS 标志位
+    防重，与防双击提交同一原则）。返回 True 表示检测到该弹窗。
+    """
+    msg = _get_visible_swal_text(page)
+    if not msg or not any(k in msg for k in _MODERATION_PROMPT_KEYWORDS):
+        return False
+    one_line = " ".join(msg.split())
+    try:
+        already = page.evaluate('() => window.__caimogu_moderation_confirmed === true')
+    except Exception:
+        already = True  # 页面异常时不再点击，交给刷新验证兜底
+    if not already:
+        try:
+            btn = page.query_selector(".swal2-confirm")
+            if btn and btn.is_visible():
+                btn.click(timeout=2000)
+                logger.info("检测到水贴审核确认框，已点击【继续发布】：%s", one_line)
+            else:
+                logger.warning("检测到水贴审核确认框但找不到确认按钮，等待刷新验证兜底：%s", one_line)
+        except Exception as e:
+            # 点击可能已发出：置标志防重试，结果交给后续验证流程判断
+            logger.warning("点击水贴审核确认框异常(%s)，不再重试：%s", e, one_line)
+        try:
+            page.evaluate('() => { window.__caimogu_moderation_confirmed = true }')
+            page.wait_for_timeout(500)
+        except Exception:
+            pass
+    return True
+
+
 def get_comment_count(page, logger):
     """获取当前帖子页面的评论/回复数量，用于检测提交后新评论是否出现
 
@@ -2202,8 +2392,13 @@ def wait_reply_result(page, logger, previous_editor_text, initial_comments=None,
     if initial_comments is not None:
         logger.info("提交前评论数: %d", initial_comments)
 
+    last_prompt = ""  # 上一秒读到的提示文本，相同则不重复记日志（V3.5.1）
     for _ in range(10):
         page.wait_for_timeout(1000)
+
+        # 0. 水贴审核确认框（V3.5.1）：点击"继续发布"后本秒到此为止
+        if handle_moderation_confirm(page, logger):
+            continue
 
         # 1. 检查新评论是否出现（最可靠的成功信号）
         current_comments = get_comment_count(page, logger)
@@ -2212,20 +2407,19 @@ def wait_reply_result(page, logger, previous_editor_text, initial_comments=None,
                 logger.info("评论数从 %d 增加到 %d，确认提交成功", initial_comments, current_comments)
                 return True, "comment_count_increase"
 
-        # 2. 检查明确成功提示
-        msg = get_visible_success_message(page)
+        # 2/3. 读取提交提示：成功与错误弹窗共用同一 DOM，只读一次；
+        #      与上一秒相同的提示不重复记日志（V3.5.1）
+        msg = get_visible_success_message(page) or get_visible_error_message(page)
         if msg:
-            logger.info("检测到提交提示: %s", msg)
+            if msg != last_prompt:
+                last_prompt = msg
+                if any(word in msg for word in error_words):
+                    logger.warning("检测到提交错误提示: %s", msg)
+                else:
+                    logger.info("检测到提交提示: %s", msg)
             if any(word in msg for word in success_words):
                 return True, "success_toast"
             if any(word in msg for word in error_words):
-                return False, ""
-
-        # 3. 检查明确错误提示
-        err = get_visible_error_message(page)
-        if err:
-            logger.warning("检测到提交错误提示: %s", err)
-            if any(word in err for word in error_words):
                 return False, ""
 
         # 4. 编辑器清空后，继续等待；同时尝试文本匹配确认成功
@@ -2805,6 +2999,13 @@ def show_notification(title, message):
         pass
 
 
+def _relogin_hint():
+    """重新登录指引：exe 版引导打开界面，源码版给出命令行"""
+    if getattr(sys, "frozen", False):
+        return "请双击本程序打开主界面，点击【配置登录】重新登录"
+    return "请运行：\npython caimogu_signin.py --login"
+
+
 def run_signin():
     """执行自动签到主流程"""
     logger = setup_logging()
@@ -2862,7 +3063,7 @@ def _run_signin_locked(logger, config, reply_count, headless, already_count, rem
     if not auth_state:
         logger.error("登录状态读取失败或不存在，请重新配置登录。")
         logger.error("请运行: python caimogu_signin.py --login")
-        show_notification("采蘑菇签到失败", "登录状态读取失败或不存在。\n\n请运行：\npython caimogu_signin.py --login")
+        show_notification("采蘑菇签到失败", "登录状态读取失败或不存在。\n\n" + _relogin_hint())
         return
 
     with sync_playwright() as p:
@@ -2876,7 +3077,7 @@ def _run_signin_locked(logger, config, reply_count, headless, already_count, rem
             if not check_login_status(page, logger, auth_state):
                 logger.error("登录状态已失效！请重新配置登录。")
                 logger.error("请运行: python caimogu_signin.py --login")
-                show_notification("采蘑菇签到失败", "登录状态已失效！\n\n请运行以下命令重新登录：\npython caimogu_signin.py --login")
+                show_notification("采蘑菇签到失败", "登录状态已失效！\n\n" + _relogin_hint())
                 return
 
             logger.info("登录状态有效")
@@ -3059,7 +3260,7 @@ def _run_signin_locked(logger, config, reply_count, headless, already_count, rem
                 if auth_expired:
                     show_notification(
                         "采蘑菇签到失败 - 登录已过期",
-                        "登录令牌已过期，签到中止。\n\n请运行以下命令重新登录：\npython caimogu_signin.py --login"
+                        "登录令牌已过期，签到中止。\n\n" + _relogin_hint()
                     )
                 else:
                     show_notification(
@@ -3110,11 +3311,11 @@ def show_help():
 def set_ai_cli():
     """一次设置 AI Key、OpenAI 兼容接口地址和模型名"""
     config = load_config()
-    current_url = config.get("deepseek_base_url", DEFAULT_CONFIG["deepseek_base_url"])
-    current_model = config.get("deepseek_model", DEFAULT_CONFIG["deepseek_model"])
+    current_url = config.get("ai_base_url", DEFAULT_CONFIG["ai_base_url"])
+    current_model = config.get("ai_model", DEFAULT_CONFIG["ai_model"])
 
     print("=" * 50)
-    print("  设置 AI 接口")
+    print("  设置 AI 接口（OpenAI 兼容，不限于 DeepSeek）")
     print("=" * 50)
     print()
     print("当前接口地址: %s" % current_url)
@@ -3134,12 +3335,12 @@ def set_ai_cli():
     model = input("模型名（留空保持当前）: ").strip() or current_model
 
     try:
-        config["deepseek_base_url"] = base_url
-        config["deepseek_model"] = model
+        config["ai_base_url"] = base_url
+        config["ai_model"] = model
         save_json(PATHS["config"], config)
         print("[成功] 已更新接口地址和模型：")
-        print("  deepseek_base_url = %s" % base_url)
-        print("  deepseek_model    = %s" % model)
+        print("  ai_base_url = %s" % base_url)
+        print("  ai_model    = %s" % model)
     except Exception as e:
         print("[错误] 保存失败: %s" % e)
     print()
@@ -3566,10 +3767,10 @@ class CaimoguGUI:
         entries = {}
         fields = (
             ("key", "API Key（粘贴后自动加密保存）", "*", ""),
-            ("url", "接口地址（OpenAI 兼容）", None,
-             cfg.get("deepseek_base_url", DEFAULT_CONFIG["deepseek_base_url"])),
+            ("url", "接口地址（OpenAI 兼容，不限于 DeepSeek）", None,
+             cfg.get("ai_base_url", DEFAULT_CONFIG["ai_base_url"])),
             ("model", "模型名", None,
-             cfg.get("deepseek_model", DEFAULT_CONFIG["deepseek_model"])),
+             cfg.get("ai_model", DEFAULT_CONFIG["ai_model"])),
         )
         for key, label, show, prefill in fields:
             ctk.CTkLabel(form, text=label, font=ctk.CTkFont(size=13),
@@ -3584,14 +3785,14 @@ class CaimoguGUI:
                 key = entries["key"].get().strip()
                 if key:
                     save_api_key(key)
-                cfg["deepseek_base_url"] = (
+                cfg["ai_base_url"] = (
                     entries["url"].get().strip()
-                    or cfg.get("deepseek_base_url",
-                               DEFAULT_CONFIG["deepseek_base_url"]))
-                cfg["deepseek_model"] = (
+                    or cfg.get("ai_base_url",
+                               DEFAULT_CONFIG["ai_base_url"]))
+                cfg["ai_model"] = (
                     entries["model"].get().strip()
-                    or cfg.get("deepseek_model",
-                               DEFAULT_CONFIG["deepseek_model"]))
+                    or cfg.get("ai_model",
+                               DEFAULT_CONFIG["ai_model"]))
                 save_json(PATHS["config"], cfg)
                 self._gui_log("[成功] AI 设置已保存")
                 self._refresh_status()

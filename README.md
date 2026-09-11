@@ -69,8 +69,8 @@ python caimogu_signin.py --help      # 显示帮助
   "max_delay": 20,
   "headless": true,
   "page_timeout_ms": 90000,
-  "deepseek_base_url": "https://token.sensenova.cn/v1",
-  "deepseek_model": "deepseek-v4-flash"
+  "ai_base_url": "https://token.sensenova.cn/v1",
+  "ai_model": "deepseek-v4-flash"
 }
 ```
 
@@ -81,8 +81,8 @@ python caimogu_signin.py --help      # 显示帮助
 | `min_delay` / `max_delay` | 每条回复间隔（秒） | 8-20 |
 | `headless` | 是否无头模式 | true |
 | `page_timeout_ms` | 页面超时时间（毫秒） | 90000 |
-| `deepseek_base_url` | OpenAI 兼容 API 地址 | DeepSeek 官方 |
-| `deepseek_model` | 模型名 | deepseek-chat |
+| `ai_base_url` | OpenAI 兼容 API 地址 | DeepSeek 官方 |
+| `ai_model` | 模型名 | deepseek-chat |
 
 ## 设置 AI 接口
 
@@ -95,21 +95,21 @@ python caimogu_signin.py --set-ai
 Key 会使用 Windows DPAPI 加密保存到 `api_key.enc`，绑定当前 Windows 用户。接口地址和模型写入 `config.json`。也可以只设置环境变量：
 
 ```powershell
-$env:CAIMOGU_DEEPSEEK_API_KEY = "你的Key"
+$env:CAIMOGU_AI_API_KEY = "你的Key"
 ```
 
-环境变量的优先级高于 `api_key.enc`。
+环境变量的优先级高于 `api_key.enc`（旧变量名 `CAIMOGU_DEEPSEEK_API_KEY` 仍然兼容）。
 
 ### 更换接口和模型
 
-脚本调用 OpenAI 兼容的 `/chat/completions` 接口。只要服务商提供这种接口，填入它的地址和模型名即可，没有固定服务商限制。一个 Key 对应一个 `deepseek_base_url`。
+脚本调用 OpenAI 兼容的 `/chat/completions` 接口。只要服务商提供这种接口，填入它的地址和模型名即可，没有固定服务商限制。一个 Key 对应一个 `ai_base_url`。
 
 DeepSeek 官方示例：
 
 ```json
 {
-  "deepseek_base_url": "https://api.deepseek.com/v1",
-  "deepseek_model": "deepseek-chat"
+  "ai_base_url": "https://api.deepseek.com/v1",
+  "ai_model": "deepseek-chat"
 }
 ```
 
@@ -117,8 +117,8 @@ DeepSeek 官方示例：
 
 ```json
 {
-  "deepseek_base_url": "https://token.sensenova.cn/v1",
-  "deepseek_model": "deepseek-v4-flash"
+  "ai_base_url": "https://token.sensenova.cn/v1",
+  "ai_model": "deepseek-v4-flash"
 }
 ```
 
@@ -208,7 +208,8 @@ playwright install chromium
 - 登录 Cookie 精简为站点功能 Cookie 白名单（`cmg_token`、`CAIMOGU`），第三方广告和统计 Cookie 会被过滤。
 - 加密文件只允许当前 Windows 用户、SYSTEM 和管理员读取。
 - 加密文件绑定当前 Windows 用户和这台电脑，复制到其他电脑或用户后无法解密。
-- 如果旧版 `config.json` 仍包含 `deepseek_api_key`，新版首次运行会自动迁移并清空该字段。
+- 如果旧版 `config.json` 仍包含 `deepseek_api_key` 明文 Key，新版首次运行会自动加密迁移并清空该字段。
+- 旧版 `deepseek_base_url` / `deepseek_model` 配置项已更名为 `ai_base_url` / `ai_model`（接口本身是通用的 OpenAI 兼容格式，不限于 DeepSeek），首次运行会自动迁移，无需手动修改。
 
 ## Windows 免安装版
 
