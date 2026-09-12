@@ -39,7 +39,7 @@ except ImportError:
 #  1. 路径与常量
 # ============================================================
 
-VERSION = "3.5.1"
+VERSION = "3.5.2"
 
 if getattr(sys, "frozen", False):
     SCRIPT_DIR = Path(sys.executable).parent.absolute()
@@ -818,13 +818,17 @@ def validate_config(config):
 
 def load_config():
     """加载配置，不存在则自动创建默认配置"""
-    config = DEFAULT_CONFIG.copy()
     if not PATHS["config"].exists():
+        config = DEFAULT_CONFIG.copy()
         save_json(PATHS["config"], config)
         return config
-    config.update(load_json(PATHS["config"], {}))
+    # 必须在合并默认值之前迁移旧键名，否则 DEFAULT_CONFIG 预填的
+    # ai_base_url 会被误认为用户已设置，导致旧配置值被默认值覆盖
+    user_cfg = load_json(PATHS["config"], {})
+    _rename_legacy_ai_keys(user_cfg)
+    config = DEFAULT_CONFIG.copy()
+    config.update(user_cfg)
     config = validate_config(config)
-    _rename_legacy_ai_keys(config)
     _migrate_config_secret(config)
     return config
 

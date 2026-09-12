@@ -749,7 +749,7 @@ check("记录 error=too_similar", rec.get("status") == "FAILED" and rec.get("err
 # ============================================================
 print("\n== 14. 状态机与版本 ==")
 check("POST_STATUS 包含 PENDING_VERIFY", "PENDING_VERIFY" in cs.POST_STATUS)
-check("版本号为 3.5.1", cs.VERSION == "3.5.1", f"got {cs.VERSION}")
+check("版本号为 3.5.2", cs.VERSION == "3.5.2", f"got {cs.VERSION}")
 check("通用模板九类齐全",
       set(cs._REPLY_TEMPLATES_GENERIC.keys()) == set(cs._REPLY_TEMPLATES.keys()),
       f"got {sorted(cs._REPLY_TEMPLATES_GENERIC.keys())}")
@@ -1118,6 +1118,32 @@ _new30 = {"circle_url": "https://www.caimogu.cc/circle/1.html"}
 cs._rename_legacy_ai_keys(_new30)
 check("无旧键时迁移函数无副作用",
       "ai_base_url" not in _new30 and _new30["circle_url"].endswith("1.html"))
+
+# ============================================================
+# 31. V3.5.2: load_config 完整流程——旧键迁移不被默认值抢占
+# ============================================================
+print("\n== 31. V3.5.2: load_config 旧键迁移不被默认值抢占 ==")
+_old31 = {"deepseek_base_url": "https://token.sensenova.cn/v1",
+          "deepseek_model": "deepseek-v4-flash",
+          "circle_url": "https://www.caimogu.cc/circle/308.html"}
+cs.save_json(cs.PATHS["config"], _old31)
+_cfg31 = cs.load_config()
+check("完整流程：旧 deepseek_* 配置值保留为 ai_*",
+      _cfg31["ai_base_url"] == "https://token.sensenova.cn/v1"
+      and _cfg31["ai_model"] == "deepseek-v4-flash",
+      f"got {_cfg31['ai_base_url']} / {_cfg31['ai_model']}")
+check("完整流程：旧键已从磁盘配置中删除",
+      "deepseek_base_url" not in cs.load_json(cs.PATHS["config"], {}))
+_disk31 = cs.load_json(cs.PATHS["config"], {})
+check("完整流程：迁移结果已持久化（磁盘上是 sensenova 而非默认值）",
+      _disk31.get("ai_base_url") == "https://token.sensenova.cn/v1",
+      f"got {_disk31.get('ai_base_url')!r}")
+
+cs.save_json(cs.PATHS["config"], {"circle_url": "https://www.caimogu.cc/circle/308.html"})
+_cfg31b = cs.load_config()
+check("无旧键时默认值正常提供",
+      _cfg31b["ai_base_url"] == cs.DEFAULT_CONFIG["ai_base_url"]
+      and _cfg31b["ai_model"] == cs.DEFAULT_CONFIG["ai_model"])
 
 print("\n" + "=" * 50)
 print(f"结果: {len(PASS)} 通过, {len(FAIL)} 失败")
