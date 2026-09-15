@@ -39,7 +39,7 @@ except ImportError:
 #  1. 路径与常量
 # ============================================================
 
-VERSION = "3.5.2"
+VERSION = "3.5.3"
 
 if getattr(sys, "frozen", False):
     SCRIPT_DIR = Path(sys.executable).parent.absolute()
@@ -3410,6 +3410,16 @@ def autostart_vbs_path():
             / "Programs" / "Startup" / AUTOSTART_VBS_NAME)
 
 
+def _vbs_run_line(cmd):
+    """命令行 -> WshShell.Run 语句；字符串字面量内的引号按 VBScript 规则双写
+
+    历史 bug：两个带引号路径之间第二段开头多写了一个引号，VBScript 会
+    在此提前闭合字符串（编译错误 800A0401 语句未结束），开机弹错且签到
+    不运行。必须先拼好整条命令再做统一转义。
+    """
+    return 'WshShell.Run "%s", 0, False' % cmd.replace('"', '""')
+
+
 def set_autostart(enable):
     """设置/取消开机自启（写 VBS 到 Startup 目录，后台 --auto 模式）"""
     vbs = autostart_vbs_path()
@@ -3420,16 +3430,15 @@ def set_autostart(enable):
         except OSError:
             return False
     if getattr(sys, "frozen", False):
-        run_line = 'WshShell.Run """%s"" --auto", 0, False' % sys.executable
+        cmd = '"%s" --auto' % sys.executable
     else:
-        run_line = 'WshShell.Run """%s"" """%s"" --auto", 0, False' % (
-            sys.executable, Path(__file__))
+        cmd = '"%s" "%s" --auto' % (sys.executable, Path(__file__))
     try:
         vbs.parent.mkdir(parents=True, exist_ok=True)
         with open(vbs, "w", encoding="gb18030") as f:
             f.write('Set WshShell = CreateObject("WScript.Shell")\n')
             f.write('WshShell.CurrentDirectory = "%s"\n' % SCRIPT_DIR)
-            f.write(run_line + "\n")
+            f.write(_vbs_run_line(cmd) + "\n")
         return vbs.exists()
     except OSError:
         return False

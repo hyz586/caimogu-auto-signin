@@ -749,7 +749,7 @@ check("记录 error=too_similar", rec.get("status") == "FAILED" and rec.get("err
 # ============================================================
 print("\n== 14. 状态机与版本 ==")
 check("POST_STATUS 包含 PENDING_VERIFY", "PENDING_VERIFY" in cs.POST_STATUS)
-check("版本号为 3.5.2", cs.VERSION == "3.5.2", f"got {cs.VERSION}")
+check("版本号为 3.5.3", cs.VERSION == "3.5.3", f"got {cs.VERSION}")
 check("通用模板九类齐全",
       set(cs._REPLY_TEMPLATES_GENERIC.keys()) == set(cs._REPLY_TEMPLATES.keys()),
       f"got {sorted(cs._REPLY_TEMPLATES_GENERIC.keys())}")
@@ -1144,6 +1144,75 @@ _cfg31b = cs.load_config()
 check("无旧键时默认值正常提供",
       _cfg31b["ai_base_url"] == cs.DEFAULT_CONFIG["ai_base_url"]
       and _cfg31b["ai_model"] == cs.DEFAULT_CONFIG["ai_model"])
+
+# ============================================================
+# 32. V3.5.3: 自启 VBS 引号转义（曾致开机弹错 800A0401 且签到不运行）
+# ============================================================
+print("\n== 32. V3.5.3: 自启 VBS 引号转义 ==")
+
+
+def _vbs_parse_literal(lit):
+    """模拟 VBScript 词法：合法字符串字面量返回解码内容，否则 None"""
+    if not (lit.startswith('"') and lit.endswith('"')) or len(lit) < 2:
+        return None
+    out, i = [], 1
+    while i < len(lit):
+        if lit[i] == '"':
+            if i + 1 < len(lit) and lit[i + 1] == '"':
+                out.append('"')
+                i += 2
+                continue
+            return "".join(out) if i == len(lit) - 1 else None
+        out.append(lit[i])
+        i += 1
+    return None
+
+
+def _vbs_run_string(run_line):
+    """提取 WshShell.Run 行的字符串字面量并解码；语法非法返回 None"""
+    if not run_line.startswith('WshShell.Run "') or not run_line.endswith('", 0, False'):
+        return None
+    lit = run_line[len("WshShell.Run "):-len(", 0, False")]
+    return _vbs_parse_literal(lit)
+
+
+_CMD32 = '"C:\\x y\\a.exe" "D:\\p q\\b.py" --auto'
+check("_vbs_run_line 转义可完整还原命令",
+      _vbs_run_string(cs._vbs_run_line(_CMD32)) == _CMD32,
+      cs._vbs_run_line(_CMD32))
+
+_BUGGY32 = ('WshShell.Run """D:\\Python\\python.exe"" '
+            '"""D:\\TRAE SOLO CN\\caimogu_signin.py"" --auto", 0, False')
+check("旧版错误转义（800A0401 现场）被识别为非法",
+      _vbs_run_string(_BUGGY32) is None, _BUGGY32)
+
+_tmp_appdata32 = tempfile.mkdtemp()
+_old_appdata32 = os.environ.get("APPDATA")
+os.environ["APPDATA"] = _tmp_appdata32
+try:
+    check("设置开机自启成功(32)", cs.set_autostart(True) is True)
+    _content32 = open(cs.autostart_vbs_path(), encoding="gb18030").read()
+    _run32 = [l for l in _content32.splitlines() if l.startswith("WshShell.Run")][0]
+    check("源码版 VBS Run 行是合法字面量",
+          _vbs_run_string(_run32) == '"%s" "%s" --auto' % (cs.sys.executable, str(cs.Path(cs.__file__))),
+          _run32)
+    cs.sys.frozen = True
+    try:
+        cs.set_autostart(True)
+        _content32f = open(cs.autostart_vbs_path(), encoding="gb18030").read()
+        _run32f = [l for l in _content32f.splitlines() if l.startswith("WshShell.Run")][0]
+        check("exe 版 VBS Run 行是合法字面量",
+              _vbs_run_string(_run32f) == '"%s" --auto' % cs.sys.executable,
+              _run32f)
+    finally:
+        del cs.sys.frozen
+    check("取消开机自启正常(32)",
+          cs.set_autostart(False) is True and cs.autostart_enabled() is False)
+finally:
+    if _old_appdata32 is None:
+        os.environ.pop("APPDATA", None)
+    else:
+        os.environ["APPDATA"] = _old_appdata32
 
 print("\n" + "=" * 50)
 print(f"结果: {len(PASS)} 通过, {len(FAIL)} 失败")
