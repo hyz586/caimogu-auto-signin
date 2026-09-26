@@ -86,7 +86,7 @@ python caimogu_signin.py --help      # 显示帮助
 
 ## 设置 AI 接口
 
-推荐双击 `设置AI.bat`，一次完成 Key、接口地址和模型设置；也可以运行：
+推荐在图形界面点【设置 AI】，一次完成 Key、接口地址和模型设置；也可以运行：
 
 ```powershell
 python caimogu_signin.py --set-ai
@@ -145,12 +145,9 @@ DeepSeek 官方示例：
 | `caimogu_signin.py` | 主程序源码 |
 | `config.json` | 配置文件 |
 | `requirements.txt` | Python 依赖 |
-| `启动签到.bat` | 主菜单 |
-| `设置AI.bat` | 设置 AI Key、接口地址和模型 |
-| `设置开机自启.bat` | 设置开机自启动 |
-| `取消开机自启.bat` | 取消开机自启动 |
-| `caimogu-auto-signin.spec` | exe 打包配置 |
-| `dist\caimogu-auto-signin.exe` | 免安装可执行文件 |
+| `打开主界面.bat` | 启动图形界面 |
+| `test_v33.py` / `test_v36.py` | 离线验收测试（不访问网络） |
+| `cmg-debug.spec` | exe 打包调试配置 |
 
 运行生成的数据：
 
@@ -167,11 +164,11 @@ DeepSeek 官方示例：
 
 **登录状态失效怎么办？**
 
-双击 `启动签到.bat`，输入 `2`，重新登录一次。
+在图形界面点【配置登录】重新登录，或运行 `python caimogu_signin.py --login`。
 
 **如何取消开机自启动？**
 
-双击 `取消开机自启.bat`。
+在图形界面再点一次【开机自启】按钮即可关闭。
 
 **想改每天回复数量？**
 
@@ -218,6 +215,17 @@ playwright install chromium
 在 exe 所在目录放置 `打赏二维码.png`，界面右上角会显示收款码。
 
 命令行参数在 exe 上同样可用（`--login`、`--set-ai`、`--test`、`--auto` 等）。
+
+## 更新记录
+
+### V3.6.0（2026-09-20）
+
+- 签到前先本地检查令牌有效期：已过期直接提示并退出，不再白启动浏览器（省约 40 秒）。
+- 令牌剩余不多于 2 天时每天弹窗提醒一次重登（此前预警只写在日志里，后台模式看不到）。
+- AI Key 失效（401/403）时立即弹窗提醒，本次运行剩余帖子自动改走模板模式，不再逐帖白试。
+- 429 限流优先遵守服务端 Retry-After；连续 3 次 429 后本次运行停用 AI，不硬撞限流。
+- AI 输出被截断（finish_reason=length）时自动放大 max_tokens 重试一次。
+- AI 失败后的兜底回复只允许"带帖子细节"的模板，提不出细节就跳过该帖（少回一条），不再发与帖子无关的万能句。
 
 ## 免责声明
 

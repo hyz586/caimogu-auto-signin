@@ -39,7 +39,7 @@ except ImportError:
 #  1. 路径与常量
 # ============================================================
 
-VERSION = "3.5.3"
+VERSION = "3.6.0"
 
 if getattr(sys, "frozen", False):
     SCRIPT_DIR = Path(sys.executable).parent.absolute()
@@ -1384,12 +1384,14 @@ def _detail_comment_overlap(comment, title, content):
     return len(comment_grams & post_grams) / len(comment_grams)
 
 
-def generate_comment_template(title, content=""):
+def generate_comment_template(title, content="", allow_generic=True):
     """模板模式：先判断 REPLY/SKIP，再生成短回复
 
     V3.3-gamma：细节不可靠时改用无细节通用模板，不硬塞；
     模板已去除虚构个人经历，改为"具体对象+回应角度+观点"结构。
     V3.5.1：细节模板候选需通过与帖子全文的重叠校验，防语义错位。
+    V3.6.0：allow_generic=False 时不用无细节万能模板兜底，直接返回 SKIP
+    （AI 降级路径专用：宁可少回一条，不发与帖子无关的水评）。
     """
     decision = judge_replyability(title, content)
     if decision == "SKIP":
@@ -1417,6 +1419,8 @@ def generate_comment_template(title, content=""):
             return random.choice(trusted)
 
     # 细节不可用或细节模板全部无效：用无细节通用模板兜底，避免生硬拼接
+    if not allow_generic:
+        return "SKIP"
     generic = _REPLY_TEMPLATES_GENERIC.get(title_type, _REPLY_TEMPLATES_GENERIC["normal"])
     generic_valid = [c for c in generic if _is_reply_valid(c, title, content)]
     if generic_valid:
@@ -1425,7 +1429,11 @@ def generate_comment_template(title, content=""):
 
 
 def _call_ai_api(url, headers, data, logger, max_retries=3):
-    """发起 API 请求，对可重试错误（429/5xx/网络超时）使用指数退避"""
+    """发起 API 请求，对可重试错误（429/5xx/网络超时）使用指数退避
+
+    返回 (content, model, finish_reason)（V3.6.0 起带 finish_reason）。
+    429 时优先遵守服务端 Retry-After 头（秒），无则指数退避，封顶 60 秒。
+    """
     import requests
     retryable_codes = {429, 500, 502, 503, 504}
     for attempt in range(max_retries + 1):
@@ -1435,12 +1443,21 @@ def _call_ai_api(url, headers, data, logger, max_retries=3):
             result = resp.json()
             returned_model = result.get("model", "未知")
             logger.info("AI 返回模型: %s", returned_model)
-            raw_content = result["choices"][0]["message"]["content"]
-            return raw_content, returned_model
+            choice = result["choices"][0]
+            raw_content = choice["message"]["content"]
+            finish_reason = choice.get("finish_reason", "")
+            return raw_content, returned_model, finish_reason
         except requests.exceptions.HTTPError as e:
             status = e.response.status_code if e.response is not None else 0
             if status in retryable_codes and attempt < max_retries:
                 wait = 2 ** (attempt + 1)
+                if status == 429:
+                    ra = (getattr(e.response, "headers", None) or {}).get("Retry-After")
+                    try:
+                        if ra:
+                            wait = min(max(int(float(ra)), 1), 60)
+                    except (TypeError, ValueError):
+                        pass
                 logger.warning("API 返回 %d，%d 秒后重试 (%d/%d)", status, wait, attempt + 1, max_retries)
                 time.sleep(wait)
                 continue
@@ -1457,6 +1474,7 @@ def _call_ai_api(url, headers, data, logger, max_retries=3):
 FALLBACK_REASONS = (
     "empty_response",    # AI 两次返回空/过短
     "429",               # API 限流（重试后仍失败）
+    "auth_error",        # 401/403 Key 失效或欠费（V3.6.0 起单列，触发运行级禁用+弹窗）
     "http_error",        # 其他 HTTP 错误（401/5xx 等）
     "network_error",     # 连接失败/超时
     "banned_phrase",     # AI 输出含套话
@@ -1474,14 +1492,20 @@ def _classify_api_exception(e):
         return "network_error"
     if isinstance(e, requests.exceptions.HTTPError):
         status = e.response.status_code if e.response is not None else 0
+        if status in (401, 403):
+            return "auth_error"
         return "429" if status == 429 else "http_error"
     return "exception"
 
 
 def _template_fallback_result(title, content, reason, ai_attempts):
-    """AI 失败后回退模板，生成结构化结果"""
+    """AI 失败后回退模板，生成结构化结果
+
+    V3.6.0：回退只允许细节模板（allow_generic=False），不再发与帖子
+    无关的万能句；提不出可靠细节时 comment 为 "SKIP"，宁可少回一条。
+    """
     return {
-        "comment": generate_comment_template(title, content),
+        "comment": generate_comment_template(title, content, allow_generic=False),
         "source": "template_fallback",
         "ai_attempts": ai_attempts,
         "fallback": True,
@@ -1541,7 +1565,7 @@ def generate_comment_ai(title, content, api_key, base_url, model):
         }
 
         logger.info("AI 请求: base_url=%s, model=%s", base_url, model)
-        raw_content, _ = _call_ai_api(url, headers, data, logger)
+        raw_content, _, finish_reason = _call_ai_api(url, headers, data, logger)
         ai_attempts = 1
 
         logger.info("AI 原始返回: %s", raw_content)
@@ -1552,19 +1576,24 @@ def generate_comment_ai(title, content, api_key, base_url, model):
             return {"comment": "SKIP", "source": "ai", "ai_attempts": ai_attempts,
                     "fallback": False, "fallback_reason": ""}
 
-        if _comment_len(comment) < 5:
-            logger.warning("AI 返回空或太短，缩短输入后重试一次")
+        # V3.6.0：finish_reason=length 说明被 max_tokens 截断，放大配额重试
+        truncated = finish_reason == "length"
+        if truncated:
+            logger.warning("AI 输出被截断(finish_reason=length)，放大 max_tokens 重试一次")
+        if _comment_len(comment) < 5 or truncated:
+            if not truncated:
+                logger.warning("AI 返回空或太短，缩短输入后重试一次")
             retry_data = {
                 "model": model,
                 "messages": [
                     {"role": "system", "content": prompt},
                     {"role": "user", "content": "标题：" + title_clean[:80] + "\n正文：" + content_summary[:300]}
                 ],
-                "max_tokens": 200,
+                "max_tokens": 400 if truncated else 200,
                 "temperature": 0.9
             }
             time.sleep(1)
-            raw_content2, _ = _call_ai_api(url, headers, retry_data, logger)
+            raw_content2, _, _finish2 = _call_ai_api(url, headers, retry_data, logger)
             ai_attempts = 2
             logger.info("AI 重试返回: %s", raw_content2)
             comment = _normalize_generated_comment(raw_content2)
@@ -1607,12 +1636,50 @@ def generate_comment(title, content, config):
     """根据配置选择 AI 模式或模板模式生成评论；返回结构化 dict（V3.3-beta）
 
     dict 字段见 generate_comment_ai；未配置 API Key 时 source="template", ai_attempts=0
+
+    V3.6.0 运行级故障处理：
+    - 401/403（auth_error）：弹窗提醒一次，本次运行剩余帖子禁用 AI
+    - 429 连续 3 次：本次运行剩余帖子禁用 AI（不硬撞限流）
+    - 配置了 AI 时，降级/兜底均不发与帖子无关的万能句（allow_generic=False），
+      提不出可靠细节就返回 SKIP，宁可少回一条
     """
+    logger = logging.getLogger("caimogu")
     api_key = get_api_key(config)
     if api_key:
+        if config.get("_ai_disabled"):
+            return {
+                "comment": generate_comment_template(title, content, allow_generic=False),
+                "source": "template",
+                "ai_attempts": 0,
+                "fallback": True,
+                "fallback_reason": config.get("_ai_disabled_reason", ""),
+            }
         base_url = config.get("ai_base_url", DEFAULT_CONFIG["ai_base_url"])
         model = config.get("ai_model", DEFAULT_CONFIG["ai_model"])
-        return generate_comment_ai(title, content, api_key, base_url, model)
+        result = generate_comment_ai(title, content, api_key, base_url, model)
+        reason = result.get("fallback_reason") or ""
+        if result.get("fallback"):
+            if reason == "auth_error":
+                config["_ai_disabled"] = True
+                config["_ai_disabled_reason"] = "auth_error"
+                if not config.get("_ai_alerted"):
+                    config["_ai_alerted"] = True
+                    logger.error("AI Key 认证失败(401/403)，本次运行剩余帖子改用模板模式")
+                    show_notification(
+                        "采蘑菇签到 - AI Key 已失效",
+                        "AI 接口返回 401/403，Key 已失效或欠费。\n\n"
+                        "本次运行剩余帖子已改用模板模式（只发有细节的回帖）。\n"
+                        "请检查或重新设置 AI（--set-ai）。")
+            elif reason == "429":
+                streak = config.get("_429_streak", 0) + 1
+                config["_429_streak"] = streak
+                if streak >= 3:
+                    config["_ai_disabled"] = True
+                    config["_ai_disabled_reason"] = "429"
+                    logger.warning("429 限流连续 %d 次，本次运行剩余帖子改用模板模式", streak)
+        else:
+            config["_429_streak"] = 0
+        return result
     return {
         "comment": generate_comment_template(title, content),
         "source": "template",
@@ -2638,8 +2705,11 @@ def reply_to_post(page, post_url, config, logger, post_id=None,
         ai_attempts = gen["ai_attempts"]
         fallback_reason = gen["fallback_reason"] if gen["fallback"] else ""
         if comment == "SKIP":
-            logger.info("[POST %s] SKIPPED - 判断为不可回复", pid)
+            skip_why = ("判断为不可回复" if not gen.get("fallback")
+                        else "AI 失败且无可靠细节模板，跳过此帖")
+            logger.info("[POST %s] SKIPPED - %s", pid, skip_why)
             meta["duration_ms"] = int((time.time() - start_time) * 1000)
+            meta["error"] = "judged_skip"
             record_post_execution(pid, title, "SKIPPED", comment_source=comment_source,
                                    attempts=attempts, previous_status=previous_status,
                                    ai_attempts=ai_attempts, error="judged_skip")
@@ -2938,10 +3008,11 @@ def setup_login():
     input("按回车键退出...")
 
 
-def check_login_status(page, logger, auth_state=None):
-    """检查登录状态是否有效"""
-    state = auth_state if auth_state is not None else load_auth_state()
-    # 先检查 cmg_token 是否已过期
+def check_token_expiry_local(state):
+    """本地检查 cmg_token 过期状态（不联网、不启动浏览器）（V3.6.0）
+
+    返回 (status, exp_dt)：status ∈ {"ok", "expired", "no_token"}
+    """
     try:
         for cookie in (state or {}).get('cookies', []):
             if cookie.get('name') == 'cmg_token':
@@ -2949,15 +3020,27 @@ def check_login_status(page, logger, auth_state=None):
                 if expires > 0:
                     exp_time = datetime.fromtimestamp(expires)
                     if exp_time < datetime.now():
-                        logger.error("登录令牌(cmg_token)已于 %s 过期", exp_time.strftime('%Y-%m-%d %H:%M'))
-                        return False
-                    days_left = (exp_time - datetime.now()).days
-                    if days_left <= 2:
-                        logger.warning("登录令牌将在 %d 天后过期，请尽快重新登录", days_left)
-                    logger.info("登录令牌有效期至: %s", exp_time.strftime('%Y-%m-%d %H:%M'))
-                break
-    except Exception as e:
-        logger.warning("检查令牌过期时间时出错: %s", e)
+                        return ("expired", exp_time)
+                    return ("ok", exp_time)
+                return ("ok", None)  # 会话 Cookie，无固定过期时间
+    except Exception:
+        pass
+    return ("no_token", None)
+
+
+def check_login_status(page, logger, auth_state=None):
+    """检查登录状态是否有效"""
+    state = auth_state if auth_state is not None else load_auth_state()
+    # 先检查 cmg_token 是否已过期（V3.6.0 起复用本地预检函数）
+    tk_status, exp_time = check_token_expiry_local(state)
+    if tk_status == "expired":
+        logger.error("登录令牌(cmg_token)已于 %s 过期", exp_time.strftime('%Y-%m-%d %H:%M'))
+        return False
+    if tk_status == "ok" and exp_time:
+        days_left = (exp_time - datetime.now()).days
+        if days_left <= 2:
+            logger.warning("登录令牌将在 %d 天后过期，请尽快重新登录", days_left)
+        logger.info("登录令牌有效期至: %s", exp_time.strftime('%Y-%m-%d %H:%M'))
 
     try:
         # 个人中心只有登录后能正常访问；未登录通常会被重定向到登录页。
@@ -3010,6 +3093,33 @@ def _relogin_hint():
     return "请运行：\npython caimogu_signin.py --login"
 
 
+def maybe_remind_token_expiry(exp_time, logger):
+    """令牌临近过期时弹窗提醒，每天最多一次（V3.6.0）
+
+    预警原本只写日志，后台自启模式看不到；改为剩余 ≤2 天时弹窗，
+    提醒日期记录在 replied_posts.json，同一天不重复弹。
+    """
+    days_left = (exp_time - datetime.now()).days
+    if days_left > 2:
+        return
+    data = load_json(PATHS["replied"], {})
+    today = date.today().isoformat()
+    if data.get("token_reminder_date") == today:
+        return
+    data["token_reminder_date"] = today
+    try:
+        save_json(PATHS["replied"], data)
+    except Exception:
+        pass
+    logger.warning("登录令牌将在 %d 天后过期（%s），已弹窗提醒",
+                   days_left, exp_time.strftime('%Y-%m-%d %H:%M'))
+    show_notification(
+        "采蘑菇签到 - 登录即将过期",
+        "登录令牌将在 %d 天后过期（%s）。\n\n"
+        "请抽空重新登录一次，避免到期当天签到失败。" % (
+            days_left, exp_time.strftime('%m月%d日 %H:%M')))
+
+
 def run_signin():
     """执行自动签到主流程"""
     logger = setup_logging()
@@ -3024,6 +3134,22 @@ def run_signin():
         logger.error("未找到登录状态文件！请先配置登录。")
         logger.error("请运行: python caimogu_signin.py --login")
         return
+
+    # V3.6.0：本地预检令牌，已过期则直接退出，不再白启动浏览器（省约 40 秒）；
+    # 临期（≤2 天）则弹窗提醒，每天一次。
+    auth_state0 = load_auth_state()
+    if auth_state0:
+        tk_status, tk_exp = check_token_expiry_local(auth_state0)
+        if tk_status == "expired":
+            logger.error("登录令牌(cmg_token)已于 %s 过期", tk_exp.strftime('%Y-%m-%d %H:%M'))
+            logger.error("登录状态已失效！请重新配置登录。")
+            logger.error("请运行: python caimogu_signin.py --login")
+            show_notification("采蘑菇签到失败",
+                              "登录令牌已于 %s 过期。\n\n%s" % (
+                                  tk_exp.strftime('%Y-%m-%d %H:%M'), _relogin_hint()))
+            return
+        if tk_status == "ok" and tk_exp:
+            maybe_remind_token_expiry(tk_exp, logger)
 
     try:
         from playwright.sync_api import sync_playwright
@@ -3233,7 +3359,7 @@ def _run_signin_locked(logger, config, reply_count, headless, already_count, rem
                         time.sleep(delay)
                 else:
                     stats["failed"] += 1
-                    if meta.get("error") == "editor_not_found":
+                    if meta.get("error") in ("editor_not_found", "judged_skip"):
                         stats["skipped"] += 1
                     logger.warning("回复失败，尝试下一个帖子")
                     # 检查页面是否崩溃，若崩溃则创建新页面

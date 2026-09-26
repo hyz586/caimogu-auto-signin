@@ -289,7 +289,7 @@ check("旧版记录来源推导为 UNKNOWN", cs.pending_origin_status(active["24
 # ============================================================
 print("\n== 9. beta: generate_comment 结构化返回 ==")
 reset_data()
-cs.generate_comment_template = lambda title, content: "模板生成的测试评论"
+cs.generate_comment_template = lambda title, content, **_kw: "模板生成的测试评论"
 gen = ORIG_GENERATE_COMMENT("标题", "正文", {})
 check("模板模式返回 dict 且 source=template",
       isinstance(gen, dict) and gen["source"] == "template" and gen["comment"] == "模板生成的测试评论"
@@ -313,11 +313,11 @@ def mock_api(responses):
             item = seq.pop(0)
             if isinstance(item, Exception):
                 raise item
-            return item, "ai-api-test"
+            return item, "ai-api-test", "stop"  # V3.6.0 起 _call_ai_api 返回三元组
         raise RuntimeError("no more mock responses")
     return fake
 
-cs.generate_comment_template = lambda title, content: "模板兜底评论"
+cs.generate_comment_template = lambda title, content, **_kw: "模板兜底评论"
 
 # 10.1 首次直接成功
 cs._call_ai_api = mock_api([VALID_COMMENT])
@@ -394,7 +394,7 @@ e401 = requests.exceptions.HTTPError("401")
 e401.response = SimpleNamespace(status_code=401)
 cs._call_ai_api = mock_api([e401])
 gen = cs.generate_comment_ai("标题", "正文", "key", None, None)
-check("HTTP 401 -> http_error", gen["fallback_reason"] == "http_error", f"got {gen}")
+check("HTTP 401 -> auth_error（V3.6.0 起单列）", gen["fallback_reason"] == "auth_error", f"got {gen}")
 
 cs._call_ai_api = mock_api([ValueError("boom")])
 gen = cs.generate_comment_ai("标题", "正文", "key", None, None)
@@ -588,7 +588,7 @@ try:
     check("可用细节仍填充 {d} 插槽", all("坐骑系统" in o for o in outs), f"got {list(outs)[:2]}")
 finally:
     cs._extract_detail = orig_extract
-    cs.generate_comment_template = lambda title, content: "模板兜底评论"
+cs.generate_comment_template = lambda title, content, **_kw: "模板兜底评论"
 
 # ============================================================
 # 20. final: 评分结构（六维 + 权重和100）
@@ -749,7 +749,7 @@ check("记录 error=too_similar", rec.get("status") == "FAILED" and rec.get("err
 # ============================================================
 print("\n== 14. 状态机与版本 ==")
 check("POST_STATUS 包含 PENDING_VERIFY", "PENDING_VERIFY" in cs.POST_STATUS)
-check("版本号为 3.5.3", cs.VERSION == "3.5.3", f"got {cs.VERSION}")
+check("版本号为 3.6.0", cs.VERSION == "3.6.0", f"got {cs.VERSION}")
 check("通用模板九类齐全",
       set(cs._REPLY_TEMPLATES_GENERIC.keys()) == set(cs._REPLY_TEMPLATES.keys()),
       f"got {sorted(cs._REPLY_TEMPLATES_GENERIC.keys())}")
